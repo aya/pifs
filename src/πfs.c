@@ -179,23 +179,38 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
 static int pifs_write(const char *path, const char *buf, size_t count,
                       off_t offset, struct fuse_file_info *info)
 {
+  int fd[2];
   int ret = lseek(info->fh, offset * 2, SEEK_SET);
   if (ret == -1) {
     return -errno;
   }
-
-  for (size_t i = 0; i < count; i++) {
-    short index;
-    for (index = 0; index < SHRT_MAX; index++) {
-      if (get_byte(index) == *buf) {
-        break;
+  if(pipe(fd)){
+    perror("pipe(2) failed");
+    return -1;
+  }
+  switch(fork()){
+    case -1:
+      perror("fork(2) failed");
+      return -1;
+    case 0:
+      // child
+      dup2(fd[0], STDIN_FILENO);
+      dup2(info->fh, STDOUT_FILENO);
+      close(fd[0]);
+      close(fd[1]);
+      ret = execlp("ipfs", "ipfs", "add", "-q",  NULL);
+      if (ret == -1) {
+        return -errno;
       }
-    }
-    ret = write(info->fh, &index, sizeof index);
-    if (ret == -1) {
-      return -errno;
-    }
-    buf++;
+      break;
+    default:
+      // parent
+      close(fd[0]);
+      ret = write(fd[1], buf, sizeof(buf));
+      if (ret == -1) {
+        return -errno;
+      }
+      close(fd[1]);
   }
 
   return count;
