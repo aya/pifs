@@ -29,8 +29,6 @@
 #include <config.h>
 #include <fuse/fuse.h>
 
-unsigned char get_byte(int id);
-
 struct options {
   char *mdd;
 } options;
@@ -156,24 +154,31 @@ static int pifs_open(const char *path, struct fuse_file_info *info)
 static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
                      struct fuse_file_info *info)
 {
+  char buffer[5];
+  int size = 0;
   int ret = lseek(info->fh, offset * 2, SEEK_SET);
   if (ret == -1) {
     return -errno;
   }
-
-  for (size_t i = 0; i < count; i++) {
-    short index;
-    ret = read(info->fh, &index, sizeof index);
-    if (ret == -1) {
-      return -errno;
-    } else if (ret == 0) {
-      return i;
-    }
-    *buf = (char) get_byte(index);
-    buf++;
+  dup2(info->fh, STDIN_FILENO);
+  FILE *fp = popen("ipfs cat", "r");
+  if (fp == 0) {
+    perror("popen(3) failed");
+    return -1;
   }
+  do {
+    ret = fread(&buf[offset + size], sizeof(char), sizeof(buffer)-1, fp);
+    if (ret == -1 && errno != EAGAIN) {
+      return -errno;
+    }
+    size += ret;
+    // buf = realloc( buf, size * sizeof(char) + 1 );
+    count -= ret;
+  } while( ret == sizeof(buffer)-1 && count > 0 );
+  buf[offset + size] = '\0';
 
-  return count;
+  pclose(fp);
+  return size;
 }
 
 static int pifs_write(const char *path, const char *buf, size_t count,
@@ -206,7 +211,7 @@ static int pifs_write(const char *path, const char *buf, size_t count,
     default:
       // parent
       close(fd[0]);
-      ret = write(fd[1], buf, sizeof(buf));
+      ret = write(fd[1], buf, count);
       if (ret == -1) {
         return -errno;
       }
