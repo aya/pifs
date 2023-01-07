@@ -22,6 +22,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/statvfs.h>
 #include <sys/xattr.h>
@@ -167,12 +168,12 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
     return -1;
   }
   do {
-    ret = fread(&buf[offset + size], sizeof(char), sizeof(buffer)-1, fp);
+    ret = fread(buffer, sizeof(char), sizeof(buffer)-1, fp);
     if (ret == -1 && errno != EAGAIN) {
       return -errno;
     }
+    sprintf(&buf[offset+size], "%s", buffer);
     size += ret;
-    // buf = realloc( buf, size * sizeof(char) + 1 );
     count -= ret;
   } while( ret == sizeof(buffer)-1 && count > 0 );
   buf[offset + size] = '\0';
@@ -203,6 +204,7 @@ static int pifs_write(const char *path, const char *buf, size_t count,
       dup2(info->fh, STDOUT_FILENO);
       close(fd[0]);
       close(fd[1]);
+      // ret = execlp("ipfs", "ipfs", "add", "-q", "-s", "rabin-262144-524288-1048576", NULL);
       ret = execlp("ipfs", "ipfs", "add", "-q",  NULL);
       if (ret == -1) {
         return -errno;

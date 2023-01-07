@@ -1,5 +1,15 @@
-πfs: Never worry about data again!
+pifs: Never worry about data again!
 ==================================
+
+## FORK
+
+The idea of this fork is to replace the actual read/write operations by a call
+to the `ipfs cat` and `ipfs add` commands.
+
+I do not know what is optimal but my initial goal is to read/write 256k blocks
+of data and read/write their ipfs hashes in the metadata file.
+
+EOF
 
 πfs is a revolutionary new file system that, instead of wasting space storing
 your data on your hard drive, stores your data in π! You'll never run out of
