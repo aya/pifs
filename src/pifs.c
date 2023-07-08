@@ -111,7 +111,7 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
   int size = 0;
   FILE *fp;
   errno=0;
-  options.retour_fonction = lseek(info->fh, offset * 2, SEEK_SET);
+  options.retour_fonction = lseek(info->fh, offset, SEEK_SET);
   PIFS_TRACE(options.retour_fonction,"pour path=%s info->fh=%d\n",path,info->fh);
   if (options.retour_fonction == -1) {
     return -errno;
@@ -144,7 +144,7 @@ static int pifs_write(const char *path, const char *buf, size_t count,
 {
   int fd[2];
   errno=0;
-  options.retour_fonction = lseek(info->fh, offset * 2, SEEK_SET);
+  options.retour_fonction = lseek(info->fh, offset, SEEK_SET);
   PIFS_TRACE(options.retour_fonction,"pour path=%s info->fh=%d\n",path,info->fh);
   if (options.retour_fonction == -1) {
     return -errno;
@@ -203,7 +203,7 @@ static int pifs_read_max(const char *path, char *buf, size_t count, off_t offset
   char buffer_max[taille];
   FILE *fp;
   errno=0;
-  options.retour_fonction = lseek(info->fh, offset * 2, SEEK_SET);
+  options.retour_fonction = lseek(info->fh, offset, SEEK_SET);
   PIFS_TRACE(options.retour_fonction,"pour path=%s count=%d offset=%d info->fh=%d\n",path,count,offset,info->fh);
   if (options.retour_fonction == -1) {   
 	return -errno;
@@ -243,7 +243,7 @@ static int pifs_write_max(const char *path, const char *buf, size_t count,
   int fd[2];
   errno=0;
   FULL_PATH(path)
-  options.retour_fonction = lseek(info->fh, offset * 2, SEEK_SET);
+  options.retour_fonction = lseek(info->fh, offset, SEEK_SET);
   PIFS_TRACE(options.retour_fonction,"path=%s options.meta_data=%s info->fh=%d\n",options.full_path,options.meta_data,info->fh);
   if (options.retour_fonction == -1) {
    return -errno;
