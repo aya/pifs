@@ -1,7 +1,7 @@
-INCLUDES = $(FUSE_CFLAGS) $(EXTRA_CFLAGS)
+AM_CPPFLAGS = $(FUSE_CFLAGS) $(EXTRA_CFLAGS)
 
-bin_PROGRAMS=πfs
+bin_PROGRAMS=pifs
 
-__fs_SOURCES=πfs.c piqpr8.c
+pifs_SOURCES=pifs.c
 
-__fs_LDADD = $(FUSE_LIBS) -lm
+pifs_LDADD = $(FUSE_LIBS) -lm
