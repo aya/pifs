@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif // HAVE_SETXATTR
@@ -63,7 +64,7 @@ static struct fuse_opt pifs_opts[] = {
 
 /* define debug infos in log file */
 #define FUSE_LOG(ret,...) \
-  fuse_log(FUSE_LOG_INFO,"pid=%-6d clock=%-8ld %-16s %-6d %-32s",getpid(),clock(),__FUNCTION__,ret,ret < 0 ? strerror(errno) : ""); \
+  fuse_log(FUSE_LOG_INFO,"pid=%-8d clock=%-8ld %-16s %-8d %-32s",getpid(),clock(),__FUNCTION__,ret,ret < 0 ? strerror(errno) : ""); \
   fuse_log(FUSE_LOG_INFO,__VA_ARGS__); \
 
 /* define metadata file path */
@@ -331,9 +332,8 @@ static int pifs_open(const char *path, struct fuse_file_info *info)
 static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
                      struct fuse_file_info *info)
 {
-  char buffer[4096];
+  MDD_PATH(path);
   FILE *fp;
-  int size = 0;
   int ret = lseek(info->fh, offset, SEEK_SET);
   if (ret == -1) {
     return -errno;
@@ -345,19 +345,15 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
     perror("popen(3) failed");
     return -1;
   }
-  do {
-    ret = fread(buffer, sizeof(char), sizeof(buffer)-1, fp);
-    if (ret == -1 && errno != EAGAIN) {
-      return -errno;
-    }
-    sprintf(&buf[offset+size], "%s", buffer);
-    size += ret;
-    count -= ret;
-  } while( ret == sizeof(buffer)-1 && count > 0 );
-  buf[offset + size] = '\0';
+
+  ret = fread(buf, sizeof(char), count, fp);
+  FUSE_LOG(ret,"mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
+  if (ret == -1 && errno != EAGAIN) {
+    return -errno;
+  }
 
   pclose(fp);
-  return size;
+  return ret;
 }
 
 /** Write data to an open file
@@ -372,6 +368,9 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
 static int pifs_write(const char *path, const char *buf, size_t count,
                       off_t offset, struct fuse_file_info *info)
 {
+  MDD_PATH(path);
+  pid_t wait, pid;
+  int status;
   int fd[2];
   int ret = lseek(info->fh, offset, SEEK_SET);
   if (ret == -1) {
@@ -381,7 +380,7 @@ static int pifs_write(const char *path, const char *buf, size_t count,
     perror("pipe(2) failed");
     return -1;
   }
-  switch(fork()){
+  switch(pid = fork()){
     case -1:
       perror("fork(2) failed");
       return -1;
@@ -401,11 +400,34 @@ static int pifs_write(const char *path, const char *buf, size_t count,
       // parent
       close(fd[0]);
       ret = write(fd[1], buf, count);
+      FUSE_LOG(ret,"mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
       if (ret == -1) {
         return -errno;
       }
       close(fd[1]);
   }
+
+  // exit child
+  if(pid == 0) return -1;
+  // wait child before exit. Fuse calls pifs_write many times asking for 128k blocks of data.
+  // The parent process is giving those blocks to the child and the child is responsible to
+  // write them to the file. We have to wait for the child to finish writing to the file,
+  // otherwise we will start new childs writing together to the file at the same time.
+  do {
+    wait = waitpid(pid, &status, WUNTRACED | WCONTINUED);
+    if (wait == -1 || wait == ECHILD || wait == EINVAL) {
+      FUSE_LOG(wait,"mdd=%s, waitpid error\n",mdd_path);
+      break;
+    }
+
+    if (WIFSIGNALED(status)) {
+      FUSE_LOG(0,"mdd=%s, WIFSIGNALED, WTERMSIG=%d\n",mdd_path, WTERMSIG(status));
+    } else if (WIFSTOPPED(status)) {
+      FUSE_LOG(0,"mdd=%s, WIFSTOPPED, WSTOPSIG=%d\n",mdd_path,  WSTOPSIG(status));
+    } else if (WIFCONTINUED(status)) {
+      FUSE_LOG(0,"mdd=%s, WIFCONTINUED, WSTOPSIG=%d\n",mdd_path,  WSTOPSIG(status));
+    }
+  } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
   return count;
 }
@@ -592,7 +614,7 @@ static int pifs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     }
 
     ret = filler(buf, de->d_name, NULL, de->d_off, 0);
-    FUSE_LOG(ret,"mdd=%s, name=%s\n",mdd_path,de->d_name);
+    FUSE_LOG(ret,">mdd=%s, name=%s\n",mdd_path,de->d_name);
   } while (ret == 0);
 
   return 0;
@@ -884,7 +906,7 @@ int main (int argc, char *argv[])
       }
       fclose(fp);
       fuse_set_log_func((fuse_log_func_t) pifs_log);
-      FUSE_LOG(0,"bin=%s, dir=%s, mdd=%s, log=%s\n", args.argv[0], options.dir, options.mdd ,options.log);
+      FUSE_LOG(0,"starting pifs v%s, bin=%s, dir=%s, mdd=%s, log=%s\n", PIFS_VERSION, args.argv[0], options.dir, options.mdd ,options.log);
     }
 
     if (options.dir == NULL) {
@@ -903,6 +925,7 @@ int main (int argc, char *argv[])
   }
 
   ret = fuse_main(args.argc, args.argv, &pifs_ops, NULL);
+  FUSE_LOG(ret,"exiting pifs v%s, bin=%s, dir=%s, mdd=%s, log=%s\n", PIFS_VERSION, args.argv[0], options.dir, options.mdd ,options.log);
 /* The following error codes may be returned from fuse_main():
  *   1: Invalid option arguments
  *   2: No mount point specified
