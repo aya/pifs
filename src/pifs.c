@@ -335,14 +335,10 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
 {
   MDD_PATH(path);
   int fd[2];
-  int size = 0;
-  int status;
+  int ret, status;
   pid_t wait, pid;
-  int ret = lseek(info->fh, offset, SEEK_SET);
-  FUSE_LOG(ret,"mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
-  if (ret == -1) {
-    return -errno;
-  }
+  size_t size = 0;
+
   if(pipe(fd)){
     perror("pipe(2) failed");
     return -1;
@@ -357,7 +353,26 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
       dup2(fd[1], STDOUT_FILENO);
       close(fd[1]);
       dup2(info->fh, STDIN_FILENO);
+      ret = lseek(info->fh, offset, SEEK_SET);
+      FUSE_LOG(ret,">>mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
+      if (ret == -1) {
+        return -errno;
+      }
       // ret = execlp("ipfs", "ipfs", "add", "-q",  NULL);
+      /*
+      size_t needed = snprintf(NULL, 0, "skip=%jd", offset/4096);
+      char *skip = malloc(needed+1);
+      sprintf(skip, "skip=%jd", offset/4096);
+      needed = snprintf(NULL, 0, "bs=%zu", count);
+      char *_count = malloc(needed+1);
+      sprintf(_count, "count=%zu", count/4096);
+      ret = lseek(file, 0, SEEK_SET);
+      FUSE_LOG(ret,">mdd=%s, count=%zu, %s, offset=%jd, %s, buf=0x%08x, fh=0x%08x\n",mdd_path,count,_count,offset,skip,buf,info->fh);
+      if (ret == -1) {
+        return -errno;
+      }
+      ret = execlp("dd", "dd", "bs=4096", skip, _count, NULL);
+      */
       ret = execlp("cat", "cat", NULL);
       if (ret == -1) {
         return -errno;
@@ -368,9 +383,8 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
       close(fd[1]);
       do {
         ret = read(fd[0],buf+size,PIPE_BUFFER_SIZE);
-        count -= ret;
         size += ret;
-        FUSE_LOG(ret,">mdd=%s, count=%zu, size=%d, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,size,offset,buf,info->fh);
+        FUSE_LOG(ret,"mdd=%s, count=%zu, size=%d, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,size,offset,buf,info->fh);
         // FUSE_LOG(0,"\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n%.*s\n<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n",size,buf);
         if (ret == -1 && errno != EAGAIN) {
           return -errno;
@@ -378,7 +392,7 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
         // if (ret == 0) {
         //   buf[size] = '\0';
         // }
-      } while (ret != 0 && count > 0);
+      } while (ret != 0 && size < count);
       close(fd[0]);
   }
 
@@ -422,13 +436,10 @@ static int pifs_write(const char *path, const char *buf, size_t count,
                       off_t offset, struct fuse_file_info *info)
 {
   MDD_PATH(path);
-  pid_t wait, pid;
-  int status;
   int fd[2];
-  int ret = lseek(info->fh, offset, SEEK_SET);
-  if (ret == -1) {
-    return -errno;
-  }
+  int ret, status;
+  pid_t wait, pid;
+
   if(pipe(fd)){
     perror("pipe(2) failed");
     return -1;
@@ -443,8 +454,19 @@ static int pifs_write(const char *path, const char *buf, size_t count,
       dup2(fd[0], STDIN_FILENO);
       close(fd[0]);
       dup2(info->fh, STDOUT_FILENO);
+      ret = lseek(info->fh, offset, SEEK_SET);
+      FUSE_LOG(ret,">>mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
+      if (ret == -1) {
+        return -errno;
+      }
       // ret = execlp("ipfs", "ipfs", "add", "-q",  NULL);
-      ret = execlp("cat", "cat",  NULL);
+      /*
+      size_t needed = snprintf(NULL, 0, "seek=%jd", offset/4096);
+      char *seek = malloc(needed+1);
+      sprintf(seek, "seek=%jd", offset/4096);
+      ret = execlp("dd", "dd", "bs=4096", seek, NULL);
+      */
+      ret = execlp("cat", "cat", NULL);
       if (ret == -1) {
         return -errno;
       }
@@ -669,7 +691,7 @@ static int pifs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     }
 
     ret = filler(buf, de->d_name, NULL, de->d_off, 0);
-    FUSE_LOG(ret,">mdd=%s, name=%s\n",mdd_path,de->d_name);
+    FUSE_LOG(ret,"mdd=%s, name=%s\n",mdd_path,de->d_name);
   } while (ret == 0);
 
   return 0;
@@ -720,7 +742,20 @@ static int pifs_fsyncdir(const char *path, int datasync,
  * value provided to fuse_main() / fuse_new().
 **/
 void *pifs_init(struct fuse_conn_info *conn,
-                struct fuse_config *cfg);
+                struct fuse_config *cfg)
+{
+  (void) conn;
+  cfg->auto_cache = 1;
+  // cfg->direct_io = 1;
+  // cfg->kernel_cache = 1;
+  cfg->no_rofd_flush = 1;
+  // conn->max_read = 1048576;
+  // conn->max_readahead = 1048576;
+  // conn->max_write = 262144;
+  // conn->want &= ~FUSE_CAP_ASYNC_DIO & ~FUSE_CAP_ASYNC_READ;
+  // conn->want &= FUSE_CAP_SPLICE_WRITE & FUSE_CAP_SPLICE_MOVE & FUSE_CAP_SPLICE_READ;
+  return NULL;
+}
 
 /**
  * Clean up filesystem
@@ -913,7 +948,7 @@ static void pifs_log(enum fuse_log_level level, const char *fmt, va_list ap)
 static void usage(const char *progname)
 {
   printf("Usage: %s [options] <mountpoint>\n"
-  "pifs options:\n"
+  "PIFS options:\n"
          "    -o log=<file>          log file to trace fuse calls\n"
          "    -o mdd=<directory>     metadata directory to store ipfs hashes\n"
          "\n", progname);
@@ -929,6 +964,8 @@ int main (int argc, char *argv[])
   if (fuse_opt_parse(&args, &options, pifs_opts, NULL) == -1) {
     return -1;
   }
+  // disable multi-thread to prevent multiple simultaneous calls to pifs_read()
+  assert(fuse_opt_add_arg(&args, "-s") == 0);
 
   if (options.help) {
     usage(argv[0]);
