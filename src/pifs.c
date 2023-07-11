@@ -334,93 +334,27 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
                      struct fuse_file_info *info)
 {
   MDD_PATH(path);
-  int fd[2];
-  int ret, status;
-  pid_t wait, pid;
-  size_t size = 0;
-
-  if(pipe(fd)){
-    perror("pipe(2) failed");
+  FILE *fp;
+  int ret = lseek(info->fh, offset, SEEK_SET);
+  if (ret == -1) {
+    return -errno;
+  }
+  dup2(info->fh, STDIN_FILENO);
+  // fp = popen("ipfs cat", "r");
+  fp = popen("cat", "r");
+  if (fp == 0) {
+    perror("popen(3) failed");
     return -1;
   }
-  switch(pid = fork()){
-    case -1:
-      perror("fork(2) failed");
-      return -1;
-    case 0:
-      // child
-      close(fd[0]);
-      dup2(fd[1], STDOUT_FILENO);
-      close(fd[1]);
-      dup2(info->fh, STDIN_FILENO);
-      ret = lseek(info->fh, offset, SEEK_SET);
-      FUSE_LOG(ret,">>mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
-      if (ret == -1) {
-        return -errno;
-      }
-      // ret = execlp("ipfs", "ipfs", "add", "-q",  NULL);
-      /*
-      size_t needed = snprintf(NULL, 0, "skip=%jd", offset/4096);
-      char *skip = malloc(needed+1);
-      sprintf(skip, "skip=%jd", offset/4096);
-      needed = snprintf(NULL, 0, "bs=%zu", count);
-      char *_count = malloc(needed+1);
-      sprintf(_count, "count=%zu", count/4096);
-      ret = lseek(file, 0, SEEK_SET);
-      FUSE_LOG(ret,">mdd=%s, count=%zu, %s, offset=%jd, %s, buf=0x%08x, fh=0x%08x\n",mdd_path,count,_count,offset,skip,buf,info->fh);
-      if (ret == -1) {
-        return -errno;
-      }
-      ret = execlp("dd", "dd", "bs=4096", skip, _count, NULL);
-      */
-      ret = execlp("cat", "cat", NULL);
-      if (ret == -1) {
-        return -errno;
-      }
-      break;
-    default:
-      // parent
-      close(fd[1]);
-      do {
-        ret = read(fd[0],buf+size,PIPE_BUFFER_SIZE);
-        size += ret;
-        FUSE_LOG(ret,"mdd=%s, count=%zu, size=%d, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,size,offset,buf,info->fh);
-        // FUSE_LOG(0,"\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n%.*s\n<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n",size,buf);
-        if (ret == -1 && errno != EAGAIN) {
-          return -errno;
-        }
-        // if (ret == 0) {
-        //   buf[size] = '\0';
-        // }
-      } while (ret != 0 && size < count);
-      close(fd[0]);
+
+  ret = fread(buf, sizeof(char), count, fp);
+  FUSE_LOG(ret,"mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
+  if (ret == -1 && errno != EAGAIN) {
+    return -errno;
   }
 
-  // exit child
-  if(pid == 0) return -1;
-  // wait child before exit. Fuse calls pifs_read many times asking for 128k blocks of data.
-  // The parent process is reading those blocks from the child and the child is responsible to
-  // read them from the file. We have to wait for the child to finish reading from the file,
-  // otherwise we will start new childs reading together to the file at the same time.
-  do {
-    wait = waitpid(pid, &status, WUNTRACED | WCONTINUED);
-    if (wait == -1 || wait == ECHILD || wait == EINVAL) {
-      FUSE_LOG(wait,"mdd=%s, waitpid error\n",mdd_path);
-      break;
-    }
-
-    if (WIFEXITED(status)) {
-      FUSE_LOG(0,"mdd=%s, WIFEXITED, WEXITSTATUS=%d\n",mdd_path,WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-      FUSE_LOG(1,"mdd=%s, WIFSIGNALED, WTERMSIG=%d\n",mdd_path,WTERMSIG(status));
-    } else if (WIFSTOPPED(status)) {
-      FUSE_LOG(1,"mdd=%s, WIFSTOPPED, WSTOPSIG=%d\n",mdd_path,WSTOPSIG(status));
-    } else if (WIFCONTINUED(status)) {
-      FUSE_LOG(1,"mdd=%s, WIFCONTINUED, WSTOPSIG=%d\n",mdd_path,WSTOPSIG(status));
-    }
-  } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-
-  return size;
+  pclose(fp);
+  return ret;
 }
 
 /** Write data to an open file
@@ -436,76 +370,26 @@ static int pifs_write(const char *path, const char *buf, size_t count,
                       off_t offset, struct fuse_file_info *info)
 {
   MDD_PATH(path);
-  int fd[2];
-  int ret, status;
-  pid_t wait, pid;
-
-  if(pipe(fd)){
-    perror("pipe(2) failed");
+  FILE *fp;
+  int ret = lseek(info->fh, offset, SEEK_SET);
+  if (ret == -1) {
+    return -errno;
+  }
+  dup2(info->fh, STDOUT_FILENO);
+  // fp = popen("ipfs cat", "r");
+  fp = popen("cat", "w");
+  if (fp == 0) {
+    perror("popen(3) failed");
     return -1;
   }
-  switch(pid = fork()){
-    case -1:
-      perror("fork(2) failed");
-      return -1;
-    case 0:
-      // child
-      close(fd[1]);
-      dup2(fd[0], STDIN_FILENO);
-      close(fd[0]);
-      dup2(info->fh, STDOUT_FILENO);
-      ret = lseek(info->fh, offset, SEEK_SET);
-      FUSE_LOG(ret,">>mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
-      if (ret == -1) {
-        return -errno;
-      }
-      // ret = execlp("ipfs", "ipfs", "add", "-q",  NULL);
-      /*
-      size_t needed = snprintf(NULL, 0, "seek=%jd", offset/4096);
-      char *seek = malloc(needed+1);
-      sprintf(seek, "seek=%jd", offset/4096);
-      ret = execlp("dd", "dd", "bs=4096", seek, NULL);
-      */
-      ret = execlp("cat", "cat", NULL);
-      if (ret == -1) {
-        return -errno;
-      }
-      break;
-    default:
-      // parent
-      close(fd[0]);
-      ret = write(fd[1], buf, count);
-      FUSE_LOG(ret,"mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
-      if (ret == -1) {
-        return -errno;
-      }
-      close(fd[1]);
+
+  ret = fwrite(buf, sizeof(char), count, fp);
+  FUSE_LOG(ret,"mdd=%s, count=%zu, offset=%jd, buf=0x%08x, fh=0x%08x\n",mdd_path,count,offset,buf,info->fh);
+  if (ret == -1 && errno != EAGAIN) {
+    return -errno;
   }
 
-  // exit child
-  if(pid == 0) return -1;
-  // wait child before exit. Fuse calls pifs_write many times to write 128k blocks of data.
-  // The parent process is giving those blocks to the child and the child is responsible to
-  // write them to the file. We have to wait for the child to finish writing to the file,
-  // otherwise we will start new childs writing together to the file at the same time.
-  do {
-    wait = waitpid(pid, &status, WUNTRACED | WCONTINUED);
-    if (wait == -1 || wait == ECHILD || wait == EINVAL) {
-      FUSE_LOG(wait,"mdd=%s, waitpid error\n",mdd_path);
-      break;
-    }
-
-//    if (WIFEXITED(status)) {
-//      FUSE_LOG(0,"mdd=%s, WIFEXITED, WEXITSTATUS=%d\n",mdd_path,WEXITSTATUS(status));
-    if (WIFSIGNALED(status)) {
-      FUSE_LOG(1,"mdd=%s, WIFSIGNALED, WTERMSIG=%d\n",mdd_path,WTERMSIG(status));
-    } else if (WIFSTOPPED(status)) {
-      FUSE_LOG(1,"mdd=%s, WIFSTOPPED, WSTOPSIG=%d\n",mdd_path,WSTOPSIG(status));
-    } else if (WIFCONTINUED(status)) {
-      FUSE_LOG(1,"mdd=%s, WIFCONTINUED, WSTOPSIG=%d\n",mdd_path,WSTOPSIG(status));
-    }
-  } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-
+  pclose(fp);
   return ret;
 }
 
