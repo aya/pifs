@@ -105,7 +105,27 @@ static int pifs_getattr(const char *path, struct stat *buf, struct fuse_file_inf
 {
   MDD_PATH(path);
   int ret = lstat(mdd_path, buf);
-  FUSE_LOG(ret,"mdd=%s\n",mdd_path);
+  char stat_cmd[145];
+  char hash[48];
+  char size[15];
+
+  FILE *fp = fopen(mdd_path, "r");
+  while (fgets(hash, sizeof(hash)-1, fp) != NULL) {
+    snprintf(stat_cmd, 145, "timeout 3 ipfs dag stat %s 2>&1 >/dev/null |awk '$3 == \"Size:\" {print substr($4, 1, length($4)-1)}'", hash);
+    break;
+  }
+  fclose(fp);
+  fp = popen(stat_cmd, "r");
+  if (fp == 0) {
+    perror("popen(3) failed");
+    return -1;
+  }
+  while (fgets(size, sizeof(size)-1, fp) != NULL) {
+    buf->st_size = (off_t) size;
+    break;
+  }
+  pclose(fp);
+  FUSE_LOG(ret,"mdd=%s, hash=%s, size=%s\n",mdd_path,hash,size);
   return ret == -1 ? -errno : ret;
 }
 
@@ -335,13 +355,16 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
 {
   MDD_PATH(path);
   FILE *fp;
+  int ret;
+  /*
   int ret = lseek(info->fh, offset, SEEK_SET);
   if (ret == -1) {
     return -errno;
   }
+  */
   dup2(info->fh, STDIN_FILENO);
-  // fp = popen("ipfs cat", "r");
-  fp = popen("cat", "r");
+  fp = popen("ipfs cat", "r");
+  // fp = popen("cat", "r");
   if (fp == 0) {
     perror("popen(3) failed");
     return -1;
@@ -371,13 +394,16 @@ static int pifs_write(const char *path, const char *buf, size_t count,
 {
   MDD_PATH(path);
   FILE *fp;
+  int ret;
+  /*
   int ret = lseek(info->fh, offset, SEEK_SET);
   if (ret == -1) {
     return -errno;
   }
+  */
   dup2(info->fh, STDOUT_FILENO);
-  // fp = popen("ipfs cat", "r");
-  fp = popen("cat", "w");
+  fp = popen("ipfs add -Q", "w");
+  // fp = popen("cat", "w");
   if (fp == 0) {
     perror("popen(3) failed");
     return -1;
