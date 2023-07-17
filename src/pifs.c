@@ -23,7 +23,6 @@
 
 #define PIFS_VERSION "0.0.1"
 #define FUSE_USE_VERSION 31
-#define PIPE_BUFFER_SIZE 65536
 
 #include <assert.h>
 #include <dirent.h>
@@ -42,11 +41,29 @@
 #endif // HAVE_SETXATTR
 #include <unistd.h>
 
+/* opened file */
+typedef struct pifs_file
+{
+  uint64_t fh;
+  FILE* fp;
+} pifs_file;
+
+/* we need an association between an open file an the popen process attached to it */
+/* list of opened files */
+typedef struct pifs_files
+{
+  pifs_file** list;
+  int size;
+  int count;
+} pifs_files;
+
+/* fuse mount options */
 struct options
 {
   char *dir;
   char *mdd;
   char *log;
+  pifs_files *files;
   int help;
   int version;
 } options;
@@ -72,6 +89,75 @@ static struct fuse_opt pifs_opts[] = {
 #define MDD_PATH(path) \
   char mdd_path[PATH_MAX]; \
   snprintf(mdd_path, PATH_MAX, "%s%s", options.mdd, path); \
+
+pifs_file* pifs_file_create(uint64_t fh, int mode)
+{
+  FUSE_LOG(0,"fh=0x%08x, mode=%d\n",fh,mode);
+  FILE *fp;
+  pifs_file* file = (pifs_file*) malloc(sizeof(pifs_file));
+  // file->fh = (char*) malloc(strlen(fh) + 1);
+  // strcpy(file->fh, fh);
+  file->fh = fh;
+  if (mode == 0)
+    // fp = popen("ipfs cat", "r");
+    fp = popen("cat", "r");
+  else
+    // fp = popen("ipfs add -Q", "w");
+    fp = popen("cat", "w");
+  if (fp == 0)
+    perror("popen(3) failed");
+  else
+    file->fp = fp;
+  FUSE_LOG(0,"fh=0x%08x, fp=0x%08x\n",file->fh,file->fp);
+  return file;
+}
+
+pifs_files* pifs_files_create(int size)
+{
+  FUSE_LOG(0,"size=%zu\n",size);
+  pifs_files* files = (pifs_files*) malloc(sizeof(pifs_files));
+  files->size = size;
+  files->count = 0;
+  files->list = (pifs_file**) calloc(files->size, sizeof(pifs_file*));
+  for (int i = 0; i < files->size; i++)
+    files->list[i] = NULL;
+  return files;
+}
+
+void pifs_file_free(pifs_file* file)
+{
+  if (file->fp != NULL)
+    fclose(file->fp);
+  free(file);
+}
+
+void pifs_files_free(pifs_files* files)
+{
+  for (int i = 0; i < files->size; i++) {
+    pifs_file* file = files->list[i];
+    if (file != NULL)
+      pifs_file_free(file);
+  }
+  free(files->list);
+  free(files);
+}
+
+FILE* pifs_file_open(pifs_files* files, uint64_t fh, int mode)
+{
+  pifs_file* file = files->list[fh];
+  if (file == NULL) {
+    file = pifs_file_create(fh, mode);
+    if (files->count == files->size) {
+      // HashTable is full.
+      pifs_file_free(file);
+      return NULL;
+    }
+    files->list[fh] = file;
+    files->count++;
+  }
+  FUSE_LOG(0,"fh=0x%08x, fp=0x%08x\n",file->fh,file->fp);
+  return file->fp;
+}
 
 /** Get file attributes
  *
@@ -105,27 +191,30 @@ static int pifs_getattr(const char *path, struct stat *buf, struct fuse_file_inf
 {
   MDD_PATH(path);
   int ret = lstat(mdd_path, buf);
+/*
   char stat_cmd[145];
-  char hash[48];
-  char size[15];
-
-  FILE *fp = fopen(mdd_path, "r");
-  while (fgets(hash, sizeof(hash)-1, fp) != NULL) {
-    snprintf(stat_cmd, 145, "timeout 3 ipfs dag stat %s 2>&1 >/dev/null |awk '$3 == \"Size:\" {print substr($4, 1, length($4)-1)}'", hash);
-    break;
+  char hash[48] = "";
+  char size[15] = "";
+  if (ret == 0) {
+    FILE *fp = fopen(mdd_path, "r");
+    while (fgets(hash, sizeof(hash)-1, fp) != NULL) {
+      snprintf(stat_cmd, 145, "timeout 3 ipfs dag stat %s 2>&1 >/dev/null |awk '$3 == \"Size:\" {print substr($4, 1, length($4)-1)}'", hash);
+      break;
+    }
+    fclose(fp);
+    fp = popen(stat_cmd, "r");
+    if (fp == 0) {
+      perror("popen(3) failed");
+      return -1;
+    }
+    while (fgets(size, sizeof(size)-1, fp) != NULL) {
+      buf->st_size = (off_t) size;
+      break;
+    }
+    pclose(fp);
   }
-  fclose(fp);
-  fp = popen(stat_cmd, "r");
-  if (fp == 0) {
-    perror("popen(3) failed");
-    return -1;
-  }
-  while (fgets(size, sizeof(size)-1, fp) != NULL) {
-    buf->st_size = (off_t) size;
-    break;
-  }
-  pclose(fp);
   FUSE_LOG(ret,"mdd=%s, hash=%s, size=%s\n",mdd_path,hash,size);
+*/
   return ret == -1 ? -errno : ret;
 }
 
@@ -363,8 +452,9 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
   }
   */
   dup2(info->fh, STDIN_FILENO);
-  fp = popen("ipfs cat", "r");
+  // fp = popen("ipfs cat", "r");
   // fp = popen("cat", "r");
+  fp = pifs_file_open(options.files, info->fh, 0);
   if (fp == 0) {
     perror("popen(3) failed");
     return -1;
@@ -402,7 +492,8 @@ static int pifs_write(const char *path, const char *buf, size_t count,
   }
   */
   dup2(info->fh, STDOUT_FILENO);
-  fp = popen("ipfs add -Q", "w");
+  fp = pifs_file_open(options.files, info->fh, 1);
+  // fp = popen("ipfs add -Q", "w");
   // fp = popen("cat", "w");
   if (fp == 0) {
     perror("popen(3) failed");
@@ -476,6 +567,9 @@ int pifs_flush(const char *, struct fuse_file_info *info);
 static int pifs_release(const char *path, struct fuse_file_info *info)
 {
   MDD_PATH(path);
+  pifs_file* file = options.files->list[info->fh];
+  if (file != NULL)
+    pifs_file_free(file);
   int ret = close(info->fh);
   FUSE_LOG(ret,"mdd=%s\n",mdd_path);
   return ret == -1 ? -errno : ret;
@@ -926,6 +1020,7 @@ int main (int argc, char *argv[])
 
   }
 
+  options.files = pifs_files_create(sizeof(uint64_t));
   ret = fuse_main(args.argc, args.argv, &pifs_ops, NULL);
   FUSE_LOG(ret,"exiting pifs v%s, bin=%s, dir=%s, mdd=%s, log=%s\n", PIFS_VERSION, args.argv[0], options.dir, options.mdd ,options.log);
 /* The following error codes may be returned from fuse_main():
