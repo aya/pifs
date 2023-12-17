@@ -23,7 +23,6 @@
 
 #define PIFS_VERSION "0.0.1"
 #define FUSE_USE_VERSION 31
-#define PIPE_BUFFER_SIZE 65536
 
 #include <assert.h>
 #include <dirent.h>
@@ -73,6 +72,25 @@ static struct fuse_opt pifs_opts[] = {
   char mdd_path[PATH_MAX]; \
   snprintf(mdd_path, PATH_MAX, "%s%s", options.mdd, path); \
 
+/* convert a char[] to an off_t */
+off_t char_to_off_t(char *string) {
+  off_t size;
+  int n=strlen(string);
+  if (n == 0) {
+    return -1;
+  }
+  for (size = 0; n--; string++) {
+    if (*string < '0' || *string > '9') {
+      return -1;
+    }
+    size = size * 10 + (*string - '0');
+  }
+  if (size < 0) {
+    return -1;
+  } else {
+    return size;
+  }
+}
 /** Get file attributes
  *
  * Similar to stat().  The 'st_dev' and 'st_blksize' fields are
@@ -104,28 +122,64 @@ static struct fuse_opt pifs_opts[] = {
 static int pifs_getattr(const char *path, struct stat *buf, struct fuse_file_info *info)
 {
   MDD_PATH(path);
+  char stat_cmd[128] = "";
+  char stat_err[256] = "";
+  char hash[48] = "";
+  char size[15] = "";
+  int stat_perr[2];
   int ret = lstat(mdd_path, buf);
-  char stat_cmd[145];
-  char hash[48];
-  char size[15];
-
-  FILE *fp = fopen(mdd_path, "r");
-  while (fgets(hash, sizeof(hash)-1, fp) != NULL) {
-    snprintf(stat_cmd, 145, "timeout 3 ipfs dag stat %s 2>&1 >/dev/null |awk '$3 == \"Size:\" {print substr($4, 1, length($4)-1)}'", hash);
-    break;
+  // get the file size from ipfs, only for files (S_ISREG(buf->st_mode)) that already exist (buf->st_size != 0)
+  if (ret == 0 && S_ISREG(buf->st_mode) && buf->st_size != 0) {
+    FILE *fp = fopen(mdd_path, "r");
+    if (fp == 0) {
+      perror("fopen(3) failed");
+      return -errno;
+    }
+    buf->st_size = 0;
+    while (fgets(hash, sizeof(hash), fp) != NULL) {
+      // replace \n with \0
+      hash[strlen(hash)-1]='\0';
+      if (strlen(hash) != 46) {
+        FUSE_LOG(ret,"mdd=%s, hash=%s, error=hash length (%d) not supported\n",mdd_path,hash,strlen(hash));
+        perror("getattr failed");
+        return -ENOENT;
+      }
+      if (pipe(stat_perr) < 0) {
+        perror("pipe(2) failed");
+        return -1;
+      }
+      FILE *stat_stderr = fdopen(stat_perr[0], "r");
+      snprintf(stat_cmd, sizeof(stat_cmd)-1, "timeout 3 ipfs files stat /ipfs/%s 2>&%d |awk '$1 == \"Size:\" {print $2}'", hash, stat_perr[1]);
+      FILE *stat_stdout = popen(stat_cmd, "r");
+      if (stat_stdout == 0) {
+        perror("popen(3) failed");
+        return -errno;
+      }
+      close(stat_perr[1]);
+      while (fgets(size, sizeof(size)-1, stat_stdout) != NULL) {
+        // replace \n with \0
+        size[strlen(size)-1]='\0';
+        break;
+      }
+      buf->st_size += char_to_off_t(size);
+      while (fgets(stat_err, sizeof(stat_err)-1, stat_stderr) != NULL) {
+        // replace \n with \0
+        stat_err[strlen(stat_err)-1]='\0';
+        break;
+      }
+      if (strlen(stat_err) != 0) {
+        FUSE_LOG(ret,"mdd=%s, hash=%s, error=%s\n",mdd_path,hash,stat_err);
+        perror("getattr failed");
+        return -EIO;
+      }
+      FUSE_LOG(ret,"mdd=%s, hash=%s, size=%s\n",mdd_path,hash,size);
+      pclose(stat_stdout);
+      fclose(stat_stderr);
+      close(stat_perr[0]);
+    }
+    fclose(fp);
   }
-  fclose(fp);
-  fp = popen(stat_cmd, "r");
-  if (fp == 0) {
-    perror("popen(3) failed");
-    return -1;
-  }
-  while (fgets(size, sizeof(size)-1, fp) != NULL) {
-    buf->st_size = (off_t) size;
-    break;
-  }
-  pclose(fp);
-  FUSE_LOG(ret,"mdd=%s, hash=%s, size=%s\n",mdd_path,hash,size);
+  FUSE_LOG(ret,"mdd=%s, mode=%o, uid=%d, gid=%d, size=%jd\n",mdd_path,buf->st_mode,buf->st_uid,buf->st_gid,buf->st_size);
   return ret == -1 ? -errno : ret;
 }
 
