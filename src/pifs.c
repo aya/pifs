@@ -23,6 +23,9 @@
 
 #define PIFS_VERSION "0.0.1"
 #define FUSE_USE_VERSION 31
+#define HASH_SIZE 47
+#define READ_SIZE 262144
+#define WRITE_SIZE 65536
 
 #include <assert.h>
 #include <dirent.h>
@@ -409,16 +412,13 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
 {
   MDD_PATH(path);
   FILE *fp;
-  int ret;
-  /*
-  int ret = lseek(info->fh, offset, SEEK_SET);
+  int ret = lseek(info->fh, offset * HASH_SIZE / WRITE_SIZE, SEEK_SET);
   if (ret == -1) {
     return -errno;
   }
-  */
+
   dup2(info->fh, STDIN_FILENO);
   fp = popen("ipfs cat", "r");
-  // fp = popen("cat", "r");
   if (fp == 0) {
     perror("popen(3) failed");
     return -1;
@@ -710,14 +710,15 @@ void *pifs_init(struct fuse_conn_info *conn,
 {
   (void) conn;
   cfg->auto_cache = 1;
-  // cfg->direct_io = 1;
+  cfg->direct_io = 1;
   // cfg->kernel_cache = 1;
   cfg->no_rofd_flush = 1;
-  // conn->max_read = 1048576;
+  // conn->max_read = READ_SIZE;
   // conn->max_readahead = 1048576;
-  // conn->max_write = 262144;
+  conn->max_write = WRITE_SIZE;
   // conn->want &= ~FUSE_CAP_ASYNC_DIO & ~FUSE_CAP_ASYNC_READ;
   // conn->want &= FUSE_CAP_SPLICE_WRITE & FUSE_CAP_SPLICE_MOVE & FUSE_CAP_SPLICE_READ;
+
   return NULL;
 }
 
@@ -868,6 +869,7 @@ static int pifs_utimens(const char *path, const struct timespec times[2], struct
 }
 
 static struct fuse_operations pifs_ops = {
+  .init = pifs_init,
   .getattr = pifs_getattr,
   .readlink = pifs_readlink,
   .mknod = pifs_mknod,
@@ -930,6 +932,12 @@ int main (int argc, char *argv[])
   }
   // disable multi-thread to prevent multiple simultaneous calls to pifs_read()
   assert(fuse_opt_add_arg(&args, "-s") == 0);
+  /*
+  assert(fuse_opt_add_arg(&args, "-o") == 0);
+  char opts[32] = "";
+  sprintf(opts,"max_read=%d",READ_SIZE);
+  assert(fuse_opt_add_arg(&args, opts) == 0);
+  */
 
   if (options.help) {
     usage(argv[0]);
