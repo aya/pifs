@@ -91,7 +91,7 @@ static struct fuse_opt pifs_opts[] = {
 
 /* add debug in log file */
 #define FUSE_LOG(ret,...) \
-  fuse_log(FUSE_LOG_INFO,"clock=%-8ld pid=%-8d %-16s %-8d %-32s",getpid(),clock(),__FUNCTION__,ret,ret < 0 ? strerror(errno) : ""); \
+  fuse_log(FUSE_LOG_INFO,"clock=%-8ld pid=%-8d %-16s %-11d %-32s",getpid(),clock(),__FUNCTION__,ret,ret < 0 ? strerror(errno) : ""); \
   fuse_log(FUSE_LOG_INFO,__VA_ARGS__);
 
 /* define metadata file items:
@@ -238,12 +238,12 @@ static int pifs_readlink(const char *path, char *buf, size_t bufsiz)
   MDF(path);
   int ret = readlink(mdf_path, buf, bufsiz - 1);
   if (ret == -1) {
-    FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju\n",mdf_path,mdf_node,f.files[mdf_node].size);
+    FUSE_LOG(ret,"mdf=%s, ino=%jd\n",mdf_path,mdf_node);
     return -errno;
   }
 
   buf[ret] = '\0';
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, buf=%s, bufsiz=%zu\n",mdf_path,mdf_node,f.files[mdf_node].size,buf,bufsiz);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, buf=%s, bufsiz=%zu\n",mdf_path,mdf_node,buf,bufsiz);
   return 0;
 }
 
@@ -256,8 +256,10 @@ static int pifs_readlink(const char *path, char *buf, size_t bufsiz)
 static int pifs_mknod(const char *path, mode_t mode, dev_t dev)
 {
   MDF(path);
+  // nop
+  mdf_node = mdf_node;
   int ret = mknod(mdf_path, mode, dev);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, mode=%o\n",mdf_path,mdf_node,f.files[mdf_node].size,mode);
+  FUSE_LOG(ret,"mdf=%s, mode=%o\n",mdf_path,mode);
   return ret == -1 ? -errno : ret;
 }
 
@@ -270,8 +272,10 @@ static int pifs_mknod(const char *path, mode_t mode, dev_t dev)
 static int pifs_mkdir(const char *path, mode_t mode)
 {
   MDF(path);
+  // nop
+  mdf_node = mdf_node;
   int ret = mkdir(mdf_path, mode | S_IFDIR);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, mode=%o\n",mdf_path,mdf_node,f.files[mdf_node].size,mode);
+  FUSE_LOG(ret,"mdf=%s, mode=%o\n",mdf_path,mode);
   return ret == -1 ? -errno : ret;
 }
 
@@ -280,7 +284,7 @@ static int pifs_unlink(const char *path)
 {
   MDF(path);
   int ret = unlink(mdf_path);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju\n",mdf_path,mdf_node,f.files[mdf_node].size);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd\n",mdf_path,mdf_node);
   return ret == -1 ? -errno : ret;
 }
 
@@ -289,7 +293,7 @@ static int pifs_rmdir(const char *path)
 {
   MDF(path);
   int ret = rmdir(mdf_path);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju\n",mdf_path,mdf_node,f.files[mdf_node].size);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd\n",mdf_path,mdf_node);
   return ret == -1 ? -errno : ret;
 }
 
@@ -297,8 +301,10 @@ static int pifs_rmdir(const char *path)
 static int pifs_symlink(const char *oldpath, const char *newpath)
 {
   MDF(newpath);
+  // nop
+  mdf_node = mdf_node;
   int ret = symlink(oldpath, mdf_path);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, old=%s\n",mdf_path,mdf_node,f.files[mdf_node].size,oldpath);
+  FUSE_LOG(ret,"mdf=%s, old=%s\n",mdf_path,oldpath);
   return ret == -1 ? -errno : ret;
 }
 
@@ -314,14 +320,16 @@ static int pifs_symlink(const char *oldpath, const char *newpath)
 static int pifs_rename(const char *oldpath, const char *newpath, unsigned int flags)
 {
   MDF(newpath);
+  // nop
+  mdf_node = mdf_node;
   char old_path[PATH_MAX];
   snprintf(old_path, PATH_MAX, "%s%s", options.mdd, oldpath);
   if ((flags == 0) && (access(mdf_path, R_OK) == 0)) {
-    FUSE_LOG(-1,"mdf=%s, ino=%jd, size=%ju, old=%s, flags=%o\n",mdf_path,mdf_node,f.files[mdf_node].size,old_path,flags);
+    FUSE_LOG(-1,"mdf=%s, old=%s, flags=%o\n",mdf_path,old_path,flags);
     return -1;
   }
   int ret = rename(old_path, mdf_path);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, old=%s, flags=%o\n",mdf_path,mdf_node,f.files[mdf_node].size,old_path,flags);
+  FUSE_LOG(ret,"mdf=%s, old=%s, flags=%o\n",mdf_path,old_path,flags);
   return ret == -1 ? -errno : ret;
 }
 
@@ -329,8 +337,12 @@ static int pifs_rename(const char *oldpath, const char *newpath, unsigned int fl
 static int pifs_link(const char *oldpath, const char *newpath)
 {
   MDF(newpath);
-  int ret = link(oldpath, mdf_path);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, old=%s\n",mdf_path,mdf_node,f.files[mdf_node].size,oldpath);
+  // nop
+  mdf_node = mdf_node;
+  char old_path[PATH_MAX];
+  snprintf(old_path, PATH_MAX, "%s%s", options.mdd, oldpath);
+  int ret = link(old_path, mdf_path);
+  FUSE_LOG(ret,"mdf=%s, old=%s\n",mdf_path,old_path);
   return ret == -1 ? -errno : ret;
 }
 
@@ -344,7 +356,7 @@ static int pifs_chmod(const char *path, mode_t mode, struct fuse_file_info *info
 {
   MDF(path);
   int ret = chmod(mdf_path, mode);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, mode=%o\n",mdf_path,mdf_node,f.files[mdf_node].size,mode);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, mode=%o\n",mdf_path,mdf_node,mode);
   return ret == -1 ? -errno : ret;
 }
 
@@ -361,7 +373,7 @@ static int pifs_chown(const char *path, uid_t owner, gid_t group, struct fuse_fi
 {
   MDF(path);
   int ret = chown(mdf_path, owner, group);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, owner=%d, group=%d\n",mdf_path,mdf_node,f.files[mdf_node].size,owner,group);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, owner=%d, group=%d\n",mdf_path,mdf_node,owner,group);
   return ret == -1 ? -errno : ret;
 }
 
@@ -374,11 +386,34 @@ static int pifs_chown(const char *path, uid_t owner, gid_t group, struct fuse_fi
  * Unless FUSE_CAP_HANDLE_KILLPRIV is disabled, this method is
  * expected to reset the setuid and setgid bits.
 **/
+// TODO: FIX IT!
+// f.files[mdf_node].data comes empty from pifs_open
 static int pifs_truncate(const char *path, off_t length, struct fuse_file_info *info)
 {
   MDF(path);
-  int ret = truncate(mdf_path, length);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, length=%jd\n",mdf_path,mdf_node,f.files[mdf_node].size,(intmax_t)length);
+  int ret = 0;
+
+  int fp = open(mdf_path, info->flags);
+  if (fp == -1)
+    return -errno;
+
+  // FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, size=%zu\n",mdf_path,mdf_node,f.files[mdf_node].data,f.files[mdf_node].size);
+  f.files[mdf_node].data = (char *) realloc(f.files[mdf_node].data,(length + 1) * sizeof(char));
+  if (length > f.files[mdf_node].size)
+    memset(f.files[mdf_node].data + f.files[mdf_node].size, 0, length - f.files[mdf_node].size);
+  // FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, size=%zu\n",mdf_path,mdf_node,f.files[mdf_node].data,f.files[mdf_node].size);
+
+  dup2(fp, STDIN_FILENO);
+  if ((f.files[mdf_node].fr = popen("ipfs cat", "r")) == 0)
+    return -errno;
+  lseek(info->fh, 0, SEEK_SET);
+  fread(f.files[mdf_node].data, sizeof(*f.files[mdf_node].data), length, f.files[mdf_node].fr);
+  pclose(f.files[mdf_node].fr);
+  close(fp);
+
+  f.files[mdf_node].size = length;
+  f.files[mdf_node].data[length] = '\0';
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, size=%ju, length=%jd\n",mdf_path,mdf_node,f.files[mdf_node].data,f.files[mdf_node].size,(intmax_t)length);
   return ret == -1 ? -errno : ret;
 }
 
@@ -432,16 +467,21 @@ static int pifs_open(const char *path, struct fuse_file_info *info)
 {
   MDF(path);
   int ret = open(mdf_path, info->flags);
-  if (ret != -1) info->fh = ret;
+  if (ret == -1)
+    return -errno;
+  else
+    info->fh = ret;
 
   f.files[mdf_node].data = (char *) malloc((f.files[mdf_node].size + 1) * sizeof(char));
   if (f.files[mdf_node].data == 0)
     return -errno;
+  memset(f.files[mdf_node].data, 0, f.files[mdf_node].size);
   f.files[mdf_node].data[f.files[mdf_node].size] = '\0';
 
   if ((info->flags & O_ACCMODE) == O_RDONLY) {
     dup2(info->fh, STDIN_FILENO);
-    if ((f.files[mdf_node].fr = popen("ipfs cat 2>/dev/null", "r")) == 0)
+    // if ((f.files[mdf_node].fr = popen("ipfs cat 2>/dev/null", "r")) == 0)
+    if ((f.files[mdf_node].fr = popen("ipfs cat", "r")) == 0)
       return -errno;
 
     ret = lseek(info->fh, 0, SEEK_SET);
@@ -449,7 +489,8 @@ static int pifs_open(const char *path, struct fuse_file_info *info)
     pclose(f.files[mdf_node].fr);
   }
 
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%zu, flags=%o\n",mdf_path,mdf_node,f.files[mdf_node].size,info->flags);
+  // close(info->fh);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, size=%zu, flags=%o\n",mdf_path,mdf_node,f.files[mdf_node].data,f.files[mdf_node].size,info->flags);
   return ret == -1 ? -errno : 0;
 }
 
@@ -477,7 +518,7 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
   }
   // does not work with binary files
   // int ret = strlen(buf);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, offset=%jd, count=%zu, buf=0x%08x, fh=0x%08x\n",mdf_path,mdf_node,f.files[mdf_node].size,offset,count,buf,info->fh);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, size=%ju, offset=%jd, count=%zu, buf=0x%08x\n",mdf_path,mdf_node,f.files[mdf_node].data,f.files[mdf_node].size,offset,count,buf);
   return ret;
 }
 
@@ -501,7 +542,7 @@ static int pifs_write(const char *path, const char *buf, size_t count,
   // does not work with binary files
   // int ret = strlen(f.files[mdf_node].data) - offset;
   int ret = (int) count;
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, offset=%jd, count=%zu, buf=0x%08x, fh=0x%08x\n",mdf_path,mdf_node,f.files[mdf_node].size,offset,count,buf,info->fh);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, size=%ju, offset=%jd, count=%zu, buf=0x%08x\n",mdf_path,mdf_node,f.files[mdf_node].data,f.files[mdf_node].size,offset,count,buf);
   return ret;
 }
 
@@ -562,8 +603,15 @@ int pifs_flush(const char *, struct fuse_file_info *info);
 **/
 static int pifs_release(const char *path, struct fuse_file_info *info)
 {
-  int ret = 0;
   MDF(path);
+  int ret = 0;
+  /*
+  int ret = open(mdf_path, info->flags);
+  if (ret == -1)
+    return -errno;
+  else
+    info->fh = ret;
+  */
   if ((info->flags & O_ACCMODE) != O_RDONLY) {
     dup2(info->fh, STDOUT_FILENO);
     if ((f.files[mdf_node].fw = popen("ipfs add -Q", "w")) == 0)
@@ -579,7 +627,7 @@ static int pifs_release(const char *path, struct fuse_file_info *info)
 
   close(info->fh);
   free(f.files[mdf_node].data);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%zu\n",mdf_path,mdf_node,f.files[mdf_node].size);
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, size=%zu\n",mdf_path,mdf_node,f.files[mdf_node].data,f.files[mdf_node].size);
   return ret == -1 ? -errno : ret;
 }
 
@@ -767,8 +815,9 @@ void *pifs_init(struct fuse_conn_info *conn,
   // conn->max_pages = 256;
   // conn->want &= ~FUSE_CAP_ASYNC_DIO & ~FUSE_CAP_ASYNC_READ;
   // conn->want &= FUSE_CAP_SPLICE_WRITE & FUSE_CAP_SPLICE_MOVE & FUSE_CAP_SPLICE_READ;
-  // conn->want |= conn->capable & FUSE_CAP_SPLICE_READ;
-  // conn->want |= conn->capable & FUSE_CAP_SPLICE_WRITE;
+  conn->want |= conn->capable & FUSE_CAP_SPLICE_MOVE;
+  conn->want |= conn->capable & FUSE_CAP_SPLICE_READ;
+  conn->want |= conn->capable & FUSE_CAP_SPLICE_WRITE;
 
   /* initialize files in filesystem */
   struct statvfs vfs;
@@ -780,6 +829,8 @@ void *pifs_init(struct fuse_conn_info *conn,
   for (i = 0; i < f.nfiles; i++) {
     f.files[i].size = 0;
   }
+  int ret = i;
+  FUSE_LOG(ret,"conn->want=%o\n",conn->want);
   return NULL;
 }
 
@@ -791,6 +842,8 @@ void *pifs_init(struct fuse_conn_info *conn,
 void pifs_destroy(void *private_data)
 {
   free(f.files);
+  int ret = 0;
+  FUSE_LOG(ret,"\n");
 }
 
 /**
@@ -825,7 +878,14 @@ static int pifs_create(const char *path, mode_t mode,
 {
   MDF(path);
   int ret = creat(mdf_path, mode);
-  FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, mode=%o\n",mdf_path,mdf_node,f.files[mdf_node].size,mode);
+  lstat(mdf_path, &mdf_stat); \
+  mdf_node = mdf_stat.st_ino;
+  f.files[mdf_node].size = 0;
+  f.files[mdf_node].data = (char *) malloc(sizeof(char));
+  if (f.files[mdf_node].data == 0)
+    return -errno;
+  *f.files[mdf_node].data = '\0';
+  FUSE_LOG(ret,"mdf=%s, ino=%jd, data=0x%08x, mode=%o\n",mdf_path,mdf_node,f.files[mdf_node].data,mode);
   info->fh = ret;
   return ret == -1 ? -errno : 0;
 }
@@ -899,7 +959,16 @@ static int pifs_lock(const char *path, struct fuse_file_info *info, int cmd,
                      struct flock *lock)
 {
   MDF(path);
-  int ret = fcntl(info->fh, cmd, lock);
+  int ret = 0;
+  /*
+  int ret = open(mdf_path, info->flags);
+  if (ret == -1)
+    return -errno;
+  else
+    info->fh = ret;
+  */
+  ret = fcntl(info->fh, cmd, lock);
+  // close(info->fh);
   FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, cmd=%d(%s), lock=%d(%s)\n",mdf_path,mdf_node,f.files[mdf_node].size,
            cmd,(cmd==F_GETLK?"F_GETLK":(cmd==F_SETLK?"F_SETLK":"F_SETLKW")),
            lock->l_type,(lock->l_type == F_RDLCK? "F_RDLCK":(lock->l_type == F_WRLCK?"F_WRLCK":"F_UNLCK")));
@@ -934,6 +1003,7 @@ static int pifs_utimens(const char *path, const struct timespec times[2], struct
 
 static struct fuse_operations pifs_ops = {
   .init = pifs_init,
+  .destroy = pifs_destroy,
   .getattr = pifs_getattr,
   .readlink = pifs_readlink,
   .mknod = pifs_mknod,
