@@ -92,7 +92,7 @@ static struct fuse_opt pifs_opts[] = {
 /* add debug in log file */
 #define FUSE_LOG(ret,...) \
   fuse_log(FUSE_LOG_INFO,"clock=%-8ld pid=%-8d %-16s %-8d %-32s",getpid(),clock(),__FUNCTION__,ret,ret < 0 ? strerror(errno) : ""); \
-  fuse_log(FUSE_LOG_INFO,__VA_ARGS__); \
+  fuse_log(FUSE_LOG_INFO,__VA_ARGS__);
 
 /* define metadata file items:
  * mdf_path with file path in metadata directory
@@ -441,7 +441,7 @@ static int pifs_open(const char *path, struct fuse_file_info *info)
 
   if ((info->flags & O_ACCMODE) == O_RDONLY) {
     dup2(info->fh, STDIN_FILENO);
-    if ((f.files[mdf_node].fr = popen("ipfs cat", "r")) == 0)
+    if ((f.files[mdf_node].fr = popen("ipfs cat 2>/dev/null", "r")) == 0)
       return -errno;
 
     ret = lseek(info->fh, 0, SEEK_SET);
@@ -466,14 +466,17 @@ static int pifs_read(const char *path, char *buf, size_t count, off_t offset,
                      struct fuse_file_info *info)
 {
   MDF(path);
-  memcpy(buf, f.files[mdf_node].data + offset, count);
-  if ((offset+count) < (unsigned long)f.files[mdf_node].size)
-    buf[count] = '\0';
-  else
-    buf[f.files[mdf_node].size - offset] = '\0';
+  int ret = (int) count;
+  if ((offset+count) > (unsigned long)f.files[mdf_node].size) {
+    ret = f.files[mdf_node].size - offset;
+    memcpy(buf, f.files[mdf_node].data + offset, ret);
+    // buf[f.files[mdf_node].size - offset] = '\0';
+  } else {
+    memcpy(buf, f.files[mdf_node].data + offset, count);
+    // buf[count] = '\0';
+  }
   // does not work with binary files
   // int ret = strlen(buf);
-  int ret = (int) count;
   FUSE_LOG(ret,"mdf=%s, ino=%jd, size=%ju, offset=%jd, count=%zu, buf=0x%08x, fh=0x%08x\n",mdf_path,mdf_node,f.files[mdf_node].size,offset,count,buf,info->fh);
   return ret;
 }
@@ -755,14 +758,17 @@ void *pifs_init(struct fuse_conn_info *conn,
 {
   (void) conn;
   // cfg->auto_cache = 1;
-  // cfg->direct_io = 1;
+  cfg->direct_io = 1;
   // cfg->kernel_cache = 1;
   // cfg->no_rofd_flush = 1;
   // conn->max_read = READ_SIZE;
   // conn->max_readahead = 1048576;
   // conn->max_write = WRITE_SIZE;
+  // conn->max_pages = 256;
   // conn->want &= ~FUSE_CAP_ASYNC_DIO & ~FUSE_CAP_ASYNC_READ;
   // conn->want &= FUSE_CAP_SPLICE_WRITE & FUSE_CAP_SPLICE_MOVE & FUSE_CAP_SPLICE_READ;
+  // conn->want |= conn->capable & FUSE_CAP_SPLICE_READ;
+  // conn->want |= conn->capable & FUSE_CAP_SPLICE_WRITE;
 
   /* initialize files in filesystem */
   struct statvfs vfs;
@@ -1047,7 +1053,9 @@ int main (int argc, char *argv[])
   }
 
   ret = fuse_main(args.argc, args.argv, &pifs_ops, NULL);
-  FUSE_LOG(ret,"exiting pifs v%s, bin=%s, dir=%s, mdd=%s, log=%s\n", PIFS_VERSION, args.argv[0], options.dir, options.mdd ,options.log);
+  if (options.log != NULL) {
+    FUSE_LOG(ret,"exiting pifs v%s, bin=%s, dir=%s, mdd=%s, log=%s\n", PIFS_VERSION, args.argv[0], options.dir, options.mdd ,options.log);
+  }
 /* The following error codes may be returned from fuse_main():
  *   1: Invalid option arguments
  *   2: No mount point specified
