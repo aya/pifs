@@ -10,6 +10,8 @@ pub struct PifsFile {
     pub size: i64,
     /// Track whether the file was written to (needs ipfs add on release).
     pub dirty: bool,
+    /// Highest byte offset written (write frontier).
+    pub write_frontier: usize,
 }
 
 impl PifsFile {
@@ -18,6 +20,7 @@ impl PifsFile {
             data: Vec::new(),
             size: 0,
             dirty: false,
+            write_frontier: 0,
         }
     }
 
@@ -27,6 +30,7 @@ impl PifsFile {
             data,
             size,
             dirty: false,
+            write_frontier: 0,
         }
     }
 }

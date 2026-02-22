@@ -76,7 +76,19 @@ impl PifsFilesystem {
     }
 }
 
+/// FOPEN_DIRECT_IO flag — bypass kernel page cache.
+const FOPEN_DIRECT_IO: u32 = 1;
+
 impl Filesystem for PifsFilesystem {
+    fn init(
+        &mut self,
+        _req: &Request,
+        _config: &mut fuser::KernelConfig,
+    ) -> Result<(), libc::c_int> {
+        log::info!("pifs filesystem initialized");
+        Ok(())
+    }
+
     // ─── Metadata ────────────────────────────────────────────
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
@@ -478,12 +490,17 @@ impl Filesystem for PifsFilesystem {
         let old = parent_path.join(name);
         let new_path = newparent_path.join(newname);
 
-        // Match C behavior: if flags==0 and target exists, fail
-        if flags == 0 && new_path.exists() {
+        // RENAME_NOREPLACE: fail if target exists
+        #[cfg(target_os = "linux")]
+        const RENAME_NOREPLACE: u32 = 1;
+        #[cfg(not(target_os = "linux"))]
+        const RENAME_NOREPLACE: u32 = 0; // not used on macOS
+        if flags & RENAME_NOREPLACE != 0 && new_path.exists() {
             reply.error(libc::EEXIST);
             return;
         }
 
+        log::info!("rename old={:?} new={:?} flags={}", old, new_path, flags);
         match std::fs::rename(&old, &new_path) {
             Ok(()) => {
                 if let Ok(meta) = std::fs::symlink_metadata(&new_path) {
@@ -491,7 +508,10 @@ impl Filesystem for PifsFilesystem {
                 }
                 reply.ok();
             }
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+            Err(e) => {
+                log::error!("rename failed: {:?} -> {:?}: {}", old, new_path, e);
+                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
         }
     }
 
@@ -557,6 +577,7 @@ impl Filesystem for PifsFilesystem {
                 pf.data.resize(new_size as usize, 0);
                 pf.size = new_size;
                 pf.dirty = true;
+                pf.write_frontier = new_size as usize;
             } else {
                 let mut data = Vec::new();
                 if let Ok(hashes) = read_hashes(&mdf) {
@@ -567,12 +588,14 @@ impl Filesystem for PifsFilesystem {
                     }
                 }
                 data.resize(new_size as usize, 0);
+                let frontier = new_size as usize;
                 self.files.insert(
                     ino,
                     PifsFile {
                         data,
                         size: new_size,
                         dirty: true,
+                        write_frontier: frontier,
                     },
                 );
             }
@@ -632,7 +655,7 @@ impl Filesystem for PifsFilesystem {
         name: &OsStr,
         mode: u32,
         _umask: u32,
-        flags: i32,
+        _flags: i32,
         reply: ReplyCreate,
     ) {
         let parent_path = match self.resolve_ino(parent) {
@@ -667,7 +690,7 @@ impl Filesystem for PifsFilesystem {
                 self.size_cache.insert(ino, 0);
 
                 log::info!("create ino={} fd={} mode={:o}", ino, fd, mode);
-                reply.created(&TTL, &attr, 0, fd as u64, flags as u32);
+                reply.created(&TTL, &attr, 0, fd as u64, FOPEN_DIRECT_IO);
             }
             Err(e) => {
                 unsafe { libc::close(fd) };
@@ -747,7 +770,7 @@ impl Filesystem for PifsFilesystem {
         }
 
         log::info!("open ino={} fd={} flags={:o}", ino, fd, flags);
-        reply.opened(fd as u64, 0);
+        reply.opened(fd as u64, FOPEN_DIRECT_IO);
     }
 
     fn read(
@@ -802,11 +825,29 @@ impl Filesystem for PifsFilesystem {
         };
 
         let offset = offset as usize;
-        let needed = offset + data.len();
+        let end = offset + data.len();
+
+        // Detect kernel page cache replays: if this write is below the
+        // write frontier and the buffer already has data there, the kernel
+        // is replaying stale cached pages. Skip these writes to preserve
+        // the correct data that was written in the first pass.
+        if offset < pf.write_frontier && end <= pf.data.len() {
+            log::debug!(
+                "write ino={} offset={} count={} SKIPPED (replay below frontier={})",
+                ino, offset, data.len(), pf.write_frontier
+            );
+            reply.written(data.len() as u32);
+            return;
+        }
+
+        let needed = end;
         if needed > pf.data.len() {
             pf.data.resize(needed, 0);
         }
-        pf.data[offset..offset + data.len()].copy_from_slice(data);
+        pf.data[offset..end].copy_from_slice(data);
+        if end > pf.write_frontier {
+            pf.write_frontier = end;
+        }
         pf.size = pf.data.len() as i64;
         pf.dirty = true;
 

@@ -10,7 +10,7 @@ name = "pifs"
 path = "src/main.rs"
 
 [dependencies]
-fuser = "0.15"
+fuser = { path = "fuser-patched" }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
