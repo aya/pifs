@@ -855,6 +855,10 @@ impl Filesystem for PifsFilesystem {
         reply.written(data.len() as u32);
     }
 
+    fn flush(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        reply.ok();
+    }
+
     fn release(
         &mut self,
         _req: &Request,
@@ -1150,6 +1154,10 @@ impl Filesystem for PifsFilesystem {
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 
+        // FUSE may pass flags not valid for macOS setxattr (e.g. 0x8),
+        // causing EINVAL. Strip invalid bits.
+        let safe_flags = sanitize_xattr_flags(flags);
+
         let ret = unsafe {
             libc::setxattr(
                 c_path.as_ptr(),
@@ -1157,7 +1165,7 @@ impl Filesystem for PifsFilesystem {
                 value.as_ptr() as *const libc::c_void,
                 value.len(),
                 0,
-                flags,
+                safe_flags,
             )
         };
         if ret == -1 {
@@ -1275,5 +1283,52 @@ impl Filesystem for PifsFilesystem {
         } else {
             reply.ok();
         }
+    }
+}
+
+/// Filter FUSE xattr flags to only keep flags valid for the platform's setxattr.
+/// FUSE may pass flags (e.g. 0x8 XATTR_NOSECURITY) that are invalid on macOS,
+/// causing EINVAL.
+#[cfg(target_os = "macos")]
+fn sanitize_xattr_flags(flags: i32) -> i32 {
+    // macOS setxattr only supports: XATTR_NOFOLLOW(0x1), XATTR_CREATE(0x2), XATTR_REPLACE(0x4)
+    flags & 0x07
+}
+
+#[cfg(target_os = "linux")]
+fn sanitize_xattr_flags(flags: i32) -> i32 {
+    // Linux setxattr supports: XATTR_CREATE(0x1), XATTR_REPLACE(0x2)
+    flags & 0x03
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_xattr_flags_strips_invalid_fuse_flags() {
+        // FUSE sends 0x8 for com.apple.quarantine — invalid for macOS setxattr
+        assert_eq!(sanitize_xattr_flags(0x8), 0);
+    }
+
+    #[test]
+    fn test_sanitize_xattr_flags_preserves_valid_flags() {
+        // XATTR_CREATE = 0x2 on macOS
+        assert_eq!(sanitize_xattr_flags(0x2), 0x2);
+        // XATTR_REPLACE = 0x4 on macOS
+        assert_eq!(sanitize_xattr_flags(0x4), 0x4);
+        // Both
+        assert_eq!(sanitize_xattr_flags(0x6), 0x6);
+    }
+
+    #[test]
+    fn test_sanitize_xattr_flags_mixed_valid_and_invalid() {
+        // 0x2 | 0x8 = 0xA — should keep only 0x2
+        assert_eq!(sanitize_xattr_flags(0xA), 0x2);
+    }
+
+    #[test]
+    fn test_sanitize_xattr_flags_zero_unchanged() {
+        assert_eq!(sanitize_xattr_flags(0), 0);
     }
 }

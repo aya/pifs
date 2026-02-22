@@ -697,6 +697,18 @@ test_edge_cases() {
     assert_file_size "1MB size" "$MNT/exact1m.bin" "1048576"
     rm "$MNT/exact1m.bin"
 
+    # File with xattrs (quarantine flag) — reproduces fcopyfile EINVAL bug
+    dd if=/dev/urandom of="$SRC/xattr_test.bin" bs=1024 count=100 2>/dev/null
+    # Set com.apple.quarantine xattr like macOS does for downloaded files
+    xattr -w com.apple.quarantine "0083;66543210;Safari;" "$SRC/xattr_test.bin" 2>/dev/null || true
+    if cp "$SRC/xattr_test.bin" "$MNT/xattr_test.bin" 2>/dev/null; then
+        pass "cp file with quarantine xattr"
+        assert_file_identical "xattr file integrity" "$SRC/xattr_test.bin" "$MNT/xattr_test.bin"
+        rm "$MNT/xattr_test.bin"
+    else
+        fail "cp file with quarantine xattr (fcopyfile failed)"
+    fi
+
     # Long filename (255 chars)
     local longname
     longname=$(python3 -c "print('a'*250 + '.txt')")
