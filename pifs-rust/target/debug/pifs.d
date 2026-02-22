@@ -1,0 +1,1 @@
+/Users/aya/Sources/pifs-claude/pifs-rust/target/debug/pifs: /Users/aya/Sources/pifs-claude/pifs-rust/src/filesystem.rs /Users/aya/Sources/pifs-claude/pifs-rust/src/ipfs.rs /Users/aya/Sources/pifs-claude/pifs-rust/src/main.rs /Users/aya/Sources/pifs-claude/pifs-rust/src/types.rs
