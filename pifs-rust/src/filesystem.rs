@@ -79,6 +79,30 @@ impl PifsFilesystem {
 /// FOPEN_DIRECT_IO flag — bypass kernel page cache.
 const FOPEN_DIRECT_IO: u32 = 1;
 
+/// FOPEN_PURGE_UBC — macOS-specific flag to purge the unified buffer cache on open.
+/// This ensures stale cached pages are invalidated so the kernel re-reads from FUSE.
+#[cfg(target_os = "macos")]
+const FOPEN_PURGE_UBC: u32 = 1 << 31;
+
+/// Choose FOPEN flags for an open() call based on the access mode in `flags`.
+///
+/// Read-only opens avoid DIRECT_IO so that mmap/execve works (DIRECT_IO prevents
+/// demand paging, causing SIGBUS on binary execution). On macOS we set PURGE_UBC
+/// to invalidate stale page cache entries.
+///
+/// Write-mode opens keep DIRECT_IO to prevent kernel page cache replay corruption.
+fn open_flags_for(flags: i32) -> u32 {
+    let accmode = flags & libc::O_ACCMODE;
+    if accmode == libc::O_RDONLY {
+        #[cfg(target_os = "macos")]
+        { FOPEN_PURGE_UBC }
+        #[cfg(not(target_os = "macos"))]
+        { 0 }
+    } else {
+        FOPEN_DIRECT_IO
+    }
+}
+
 impl Filesystem for PifsFilesystem {
     fn init(
         &mut self,
@@ -769,8 +793,9 @@ impl Filesystem for PifsFilesystem {
             }
         }
 
-        log::info!("open ino={} fd={} flags={:o}", ino, fd, flags);
-        reply.opened(fd as u64, FOPEN_DIRECT_IO);
+        let open_flags = open_flags_for(flags);
+        log::info!("open ino={} fd={} flags={:o} open_flags={:#x}", ino, fd, flags, open_flags);
+        reply.opened(fd as u64, open_flags);
     }
 
     fn read(
@@ -1334,5 +1359,31 @@ mod tests {
     #[test]
     fn test_sanitize_xattr_flags_zero_unchanged() {
         assert_eq!(sanitize_xattr_flags(0), 0);
+    }
+
+    #[test]
+    fn test_open_flags_rdonly_no_direct_io() {
+        // Read-only opens must NOT set DIRECT_IO, otherwise mmap/execve fails with SIGBUS
+        let flags = open_flags_for(libc::O_RDONLY);
+        assert_eq!(flags & FOPEN_DIRECT_IO, 0, "O_RDONLY must not set DIRECT_IO");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_open_flags_rdonly_purges_ubc_on_macos() {
+        let flags = open_flags_for(libc::O_RDONLY);
+        assert_ne!(flags & FOPEN_PURGE_UBC, 0, "O_RDONLY on macOS must set PURGE_UBC");
+    }
+
+    #[test]
+    fn test_open_flags_wronly_uses_direct_io() {
+        let flags = open_flags_for(libc::O_WRONLY);
+        assert_ne!(flags & FOPEN_DIRECT_IO, 0, "O_WRONLY must set DIRECT_IO");
+    }
+
+    #[test]
+    fn test_open_flags_rdwr_uses_direct_io() {
+        let flags = open_flags_for(libc::O_RDWR);
+        assert_ne!(flags & FOPEN_DIRECT_IO, 0, "O_RDWR must set DIRECT_IO");
     }
 }
