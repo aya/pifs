@@ -1240,7 +1240,7 @@ impl Filesystem for PifsFilesystem {
             let ret = unsafe {
                 libc::listxattr(
                     c_path.as_ptr(),
-                    buf.as_mut_ptr() as *mut i8,
+                    buf.as_mut_ptr() as *mut libc::c_char,
                     size as usize,
                     0,
                 )
@@ -1249,7 +1249,7 @@ impl Filesystem for PifsFilesystem {
             let ret = unsafe {
                 libc::listxattr(
                     c_path.as_ptr(),
-                    buf.as_mut_ptr() as *mut i8,
+                    buf.as_mut_ptr() as *mut libc::c_char,
                     size as usize,
                 )
             };
@@ -1313,18 +1313,22 @@ mod tests {
 
     #[test]
     fn test_sanitize_xattr_flags_preserves_valid_flags() {
-        // XATTR_CREATE = 0x2 on macOS
+        // XATTR_CREATE and XATTR_REPLACE are valid on both platforms
+        assert_eq!(sanitize_xattr_flags(0x1), 0x1);
         assert_eq!(sanitize_xattr_flags(0x2), 0x2);
-        // XATTR_REPLACE = 0x4 on macOS
-        assert_eq!(sanitize_xattr_flags(0x4), 0x4);
         // Both
-        assert_eq!(sanitize_xattr_flags(0x6), 0x6);
+        assert_eq!(sanitize_xattr_flags(0x3), 0x3);
+        // XATTR_NOFOLLOW (0x4) is macOS-only
+        #[cfg(target_os = "macos")]
+        assert_eq!(sanitize_xattr_flags(0x4), 0x4);
+        #[cfg(target_os = "linux")]
+        assert_eq!(sanitize_xattr_flags(0x4), 0x0);
     }
 
     #[test]
     fn test_sanitize_xattr_flags_mixed_valid_and_invalid() {
-        // 0x2 | 0x8 = 0xA — should keep only 0x2
-        assert_eq!(sanitize_xattr_flags(0xA), 0x2);
+        // 0x1 | 0x8 = 0x9 — should keep only 0x1
+        assert_eq!(sanitize_xattr_flags(0x9), 0x1);
     }
 
     #[test]
