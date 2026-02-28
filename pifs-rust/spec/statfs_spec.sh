@@ -10,7 +10,6 @@
 
 Describe 'Filesystem Operations'
     BeforeAll 'pifs_setup'
-    AfterAll 'pifs_teardown'
 
     # ─── statfs (df) ──────────────────────────────────────────────
 

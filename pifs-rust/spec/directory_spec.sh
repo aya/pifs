@@ -10,7 +10,6 @@
 
 Describe 'Directory Operations'
     BeforeAll 'pifs_setup'
-    AfterAll 'pifs_teardown'
 
     # ─── mkdir ────────────────────────────────────────────────────
 

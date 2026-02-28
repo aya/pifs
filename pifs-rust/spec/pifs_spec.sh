@@ -29,9 +29,7 @@
 #
 
 Describe 'pifs FUSE filesystem'
-    # Global setup/teardown
     BeforeAll 'pifs_setup'
-    AfterAll 'pifs_teardown'
 
     # ─── Final Cleanup ────────────────────────────────────────────
 

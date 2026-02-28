@@ -11,7 +11,6 @@
 
 Describe 'Link Operations'
     BeforeAll 'pifs_setup'
-    AfterAll 'pifs_teardown'
 
     # ─── Symlink ──────────────────────────────────────────────────
 

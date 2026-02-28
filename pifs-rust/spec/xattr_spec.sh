@@ -15,7 +15,6 @@
 
 Describe 'Extended Attributes (xattr)'
     BeforeAll 'pifs_setup'
-    AfterAll 'pifs_teardown'
 
     # Skip all if xattr command not available
     Skip if "xattr command not available" [ ! -x "$(command -v xattr 2>/dev/null)" ] && [ ! -x "$(command -v setfattr 2>/dev/null)" ]

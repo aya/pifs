@@ -10,7 +10,6 @@
 
 Describe 'File Metadata Operations'
     BeforeAll 'pifs_setup'
-    AfterAll 'pifs_teardown'
 
     # ─── getattr (stat) ───────────────────────────────────────────
 

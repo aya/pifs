@@ -2,6 +2,10 @@
 #
 # ShellSpec spec_helper for pifs integration tests
 #
+# Setup/teardown is done ONCE here at load time, not per-spec-file.
+# Setup is done ONCE at load time. Teardown via shellspec_after_all.
+# Spec files call pifs_setup in BeforeAll to load state into subshells.
+#
 
 # ─── Configuration ────────────────────────────────────────────
 
@@ -11,15 +15,18 @@ SPEC_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SPEC_DIR/.." && pwd)"
 PIFS_BIN="${PROJECT_DIR}/target/debug/pifs"
 
-# Temp directories (will be set up in before_all)
+# Test options
+export INCLUDE_LARGE="${INCLUDE_LARGE:-false}"
+export DO_MOUNT="${DO_MOUNT:-true}"
+
+# State file for communicating dirs between shellspec processes
+PIFS_STATE_FILE="${TMPDIR:-/tmp}/pifs-shellspec-state"
+
+# Temp directories
 export MDD=""
 export MNT=""
 export SRC=""
 export LOG=""
-
-# Test options
-export INCLUDE_LARGE="${INCLUDE_LARGE:-false}"
-export DO_MOUNT="${DO_MOUNT:-true}"
 export PIFS_PID=""
 
 # ─── Helper functions ─────────────────────────────────────────
@@ -182,61 +189,6 @@ cleanup_temp_dirs() {
     fi
 }
 
-# ─── Setup / Teardown ─────────────────────────────────────────
-
-# Singleton state file to track if setup has been done
-PIFS_STATE_FILE="${TMPDIR:-/tmp}/pifs-shellspec-state"
-
-pifs_setup() {
-    # Check if already set up (singleton pattern for multi-file runs)
-    if [ -f "$PIFS_STATE_FILE" ]; then
-        # Load existing state
-        # shellcheck disable=SC1090
-        . "$PIFS_STATE_FILE"
-        return 0
-    fi
-
-    MDD=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
-    MNT=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mnt.XXXXXX")
-    SRC=$(mktemp -d "${TMPDIR:-/tmp}/pifs-src.XXXXXX")
-    LOG="${TMPDIR:-/tmp}/pifs-test.log"
-
-    # Save state for other spec files
-    cat > "$PIFS_STATE_FILE" << EOF
-export MDD="$MDD"
-export MNT="$MNT"
-export SRC="$SRC"
-export LOG="$LOG"
-export PIFS_PID="$PIFS_PID"
-EOF
-
-    # Build if needed
-    if [ ! -x "$PIFS_BIN" ]; then
-        (cd "$PROJECT_DIR" && cargo build 2>&1) || return 1
-    fi
-
-    generate_test_files
-    mount_pifs
-
-    # Update state with PID
-    echo "export PIFS_PID=\"$PIFS_PID\"" >> "$PIFS_STATE_FILE"
-}
-
-pifs_teardown() {
-    # Only teardown if we're the last spec file (check via marker)
-    # For now, always cleanup - ShellSpec runs AfterAll for each Describe
-    if [ -f "$PIFS_STATE_FILE" ]; then
-        rm -f "$PIFS_STATE_FILE"
-        cleanup_temp_dirs
-    fi
-}
-
-# Force cleanup function (can be called manually)
-pifs_force_cleanup() {
-    rm -f "$PIFS_STATE_FILE"
-    cleanup_temp_dirs
-}
-
 # ─── Assertion helpers ────────────────────────────────────────
 
 # Assert file has specific size
@@ -316,4 +268,66 @@ compare_range() {
     data1=$(read_hex_at_offset "$file1" "$offset" "$length")
     data2=$(read_hex_at_offset "$file2" "$offset" "$length")
     [ "$data1" = "$data2" ]
+}
+
+# ─── Global Setup (runs once when spec_helper is loaded) ─────
+
+_pifs_global_setup() {
+    if [ -f "$PIFS_STATE_FILE" ]; then
+        # Already set up by a previous load — just restore state
+        # shellcheck disable=SC1090
+        . "$PIFS_STATE_FILE"
+        return 0
+    fi
+
+    MDD=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
+    MNT=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mnt.XXXXXX")
+    SRC=$(mktemp -d "${TMPDIR:-/tmp}/pifs-src.XXXXXX")
+    LOG="${TMPDIR:-/tmp}/pifs-test.log"
+
+    # Build if needed
+    if [ ! -x "$PIFS_BIN" ]; then
+        (cd "$PROJECT_DIR" && cargo build 2>&1) || return 1
+    fi
+
+    generate_test_files
+    mount_pifs
+
+    # Save state so child processes / reloads can find the dirs
+    cat > "$PIFS_STATE_FILE" << EOF
+export MDD="$MDD"
+export MNT="$MNT"
+export SRC="$SRC"
+export LOG="$LOG"
+export PIFS_PID="$PIFS_PID"
+EOF
+}
+
+_pifs_global_setup
+
+# ─── Global Teardown (ShellSpec calls this once after ALL specs) ──
+
+shellspec_after_all() {
+    if [ -f "$PIFS_STATE_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$PIFS_STATE_FILE"
+        rm -f "$PIFS_STATE_FILE"
+        cleanup_temp_dirs
+    fi
+}
+
+# ─── No-op stubs (spec files still call these via BeforeAll/AfterAll) ──
+
+pifs_setup() {
+    # State already loaded at helper init; re-source in case of subshell
+    if [ -f "$PIFS_STATE_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$PIFS_STATE_FILE"
+    fi
+}
+
+# Force cleanup function (can be called manually)
+pifs_force_cleanup() {
+    rm -f "$PIFS_STATE_FILE"
+    cleanup_temp_dirs
 }
