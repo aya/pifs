@@ -39,12 +39,14 @@ Describe 'Directory Operations'
         It "fails to create directory without parent"
             When call mkdir "$MNT/nonexistent/subdir"
             The status should be failure
+            The stderr should be present
         End
 
         It "fails to create directory that already exists"
             mkdir -p "$MNT/already_exists"
             When call mkdir "$MNT/already_exists"
             The status should be failure
+            The stderr should be present
         End
 
         AfterAll 'rm -rf "$MNT/mkdir_test" "$MNT/mkdir_mode" "$MNT/nested" "$MNT/already_exists"'
@@ -69,6 +71,7 @@ Describe 'Directory Operations'
         It "fails to remove non-empty directory"
             When call rmdir "$MNT/rmdir_nonempty"
             The status should be failure
+            The stderr should be present
         End
 
         It "removes directory after emptying it"
@@ -80,6 +83,7 @@ Describe 'Directory Operations'
         It "fails to remove non-existent directory"
             When call rmdir "$MNT/nonexistent_dir"
             The status should be failure
+            The stderr should be present
         End
     End
 

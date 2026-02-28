@@ -23,6 +23,7 @@ Describe 'File Metadata Operations'
         It "stat succeeds on file"
             When call stat "$MNT/stat_test.txt"
             The status should be success
+            The output should be present
         End
 
         It "stat shows correct file size"
@@ -33,11 +34,13 @@ Describe 'File Metadata Operations'
         It "stat succeeds on directory"
             When call stat "$MNT/stat_dir"
             The status should be success
+            The output should be present
         End
 
         It "stat fails on non-existent file"
             When call stat "$MNT/nonexistent_file"
             The status should be failure
+            The stderr should be present
         End
 
         It "stat shows file type"
@@ -58,6 +61,15 @@ Describe 'File Metadata Operations'
     # ─── File size reporting ──────────────────────────────────────
 
     Describe 'file size reporting'
+        setup_sizes() {
+            cp "$SRC/tiny.txt" "$MNT/tiny.txt"
+            cp "$SRC/small.txt" "$MNT/small.txt"
+            cp "$SRC/bin_1k.bin" "$MNT/bin_1k.bin"
+            cp "$SRC/bin_1m.bin" "$MNT/bin_1m.bin"
+            cp "$SRC/empty.txt" "$MNT/empty.txt"
+        }
+        BeforeAll 'setup_sizes'
+
         It "reports correct size for tiny.txt"
             When call assert_file_size "$MNT/tiny.txt" "$(file_size "$SRC/tiny.txt")"
             The status should be success
@@ -82,6 +94,8 @@ Describe 'File Metadata Operations'
             When call assert_file_size "$MNT/empty.txt" "0"
             The status should be success
         End
+
+        AfterAll 'rm -f "$MNT/tiny.txt" "$MNT/small.txt" "$MNT/bin_1k.bin" "$MNT/bin_1m.bin" "$MNT/empty.txt"'
     End
 
     # ─── chmod ────────────────────────────────────────────────────
@@ -112,7 +126,8 @@ Describe 'File Metadata Operations'
 
         It "sets mode to 000"
             chmod 000 "$MNT/chmod_test.txt"
-            When call assert_file_mode "$MNT/chmod_test.txt" "000"
+            # stat returns "0" not "000" on macOS
+            When call assert_file_mode "$MNT/chmod_test.txt" "0"
             The status should be success
         End
 
@@ -175,7 +190,7 @@ Describe 'File Metadata Operations'
             sleep 1
             touch "$MNT/time_test.txt"
             new_mtime=$(stat -f%m "$MNT/time_test.txt" 2>/dev/null || stat -c%Y "$MNT/time_test.txt")
-            [ "$new_mtime" -gt "$old_mtime" ]
+            When call test "$new_mtime" -gt "$old_mtime"
             The status should be success
         End
 
@@ -316,6 +331,7 @@ Describe 'File Metadata Operations'
                 echo "long" > "$MNT/$longname"
                 When call stat "$MNT/$longname"
                 The status should be success
+                The output should be present
                 rm -f "$MNT/$longname"
             End
         End

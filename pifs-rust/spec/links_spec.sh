@@ -70,6 +70,7 @@ Describe 'Link Operations'
         It "dangling symlink cannot be read"
             When call cat "$MNT/dangling_link.txt"
             The status should be failure
+            The stderr should be present
         End
 
         AfterAll 'rm -rf "$MNT/sym_target.txt" "$MNT/sym_link.txt" "$MNT/sym_target_dir" "$MNT/sym_link_dir" "$MNT/sym_abs_link.txt" "$MNT/dangling_link.txt"'
@@ -119,6 +120,7 @@ Describe 'Link Operations'
             mkdir -p "$MNT/hl_dir"
             When call ln "$MNT/hl_dir" "$MNT/hl_dir_link"
             The status should be failure
+            The stderr should be present
             rmdir "$MNT/hl_dir"
         End
 
@@ -143,12 +145,14 @@ Describe 'Link Operations'
         It "rm fails on non-existent file"
             When call rm "$MNT/nonexistent_file"
             The status should be failure
+            The stderr should be present
         End
 
         It "rm fails on directory without -r"
             mkdir -p "$MNT/unlink_dir"
             When call rm "$MNT/unlink_dir"
             The status should be failure
+            The stderr should be present
             rmdir "$MNT/unlink_dir"
         End
 

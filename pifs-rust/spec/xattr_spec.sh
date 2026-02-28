@@ -121,6 +121,7 @@ Describe 'Extended Attributes (xattr)'
         It "lists extended attributes"
             When call xattr_list "$MNT/xattr_list.txt"
             The status should be success
+            The output should be present
         End
 
         It "list includes set attributes"
@@ -204,9 +205,10 @@ Describe 'Extended Attributes (xattr)'
         BeforeAll 'setup_xattr_edge'
 
         It "handles empty value"
-            xattr_set "$MNT/xattr_edge.txt" "user.empty" ""
+            xattr_set "$MNT/xattr_edge.txt" "user.empty" "" 2>/dev/null || true
             When call xattr_get "$MNT/xattr_edge.txt" "user.empty"
             The status should be success
+            The output should be defined
         End
 
         It "handles value with spaces"
@@ -217,8 +219,7 @@ Describe 'Extended Attributes (xattr)'
 
         It "handles long attribute name"
             longname="user.$(python3 -c "print('a'*100)")"
-            xattr_set "$MNT/xattr_edge.txt" "$longname" "longname" 2>/dev/null || true
-            # Just check it doesn't crash
+            When call xattr_set "$MNT/xattr_edge.txt" "$longname" "longname"
             The status should be success
         End
 

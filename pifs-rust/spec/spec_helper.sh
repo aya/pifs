@@ -11,8 +11,7 @@
 
 set -u
 
-SPEC_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SPEC_DIR/.." && pwd)"
+PROJECT_DIR="${SHELLSPEC_PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 PIFS_BIN="${PROJECT_DIR}/target/debug/pifs"
 
 # Test options
@@ -270,11 +269,16 @@ compare_range() {
     [ "$data1" = "$data2" ]
 }
 
-# ─── Global Setup (runs once when spec_helper is loaded) ─────
+# ─── Setup / Teardown ────────────────────────────────────────
+#
+# pifs_setup is called via BeforeAll in each spec file.
+# The singleton pattern (state file) ensures mount + file generation
+# happens only once, even across multiple spec files.
+#
 
-_pifs_global_setup() {
+pifs_setup() {
     if [ -f "$PIFS_STATE_FILE" ]; then
-        # Already set up by a previous load — just restore state
+        # Already set up — just restore state variables
         # shellcheck disable=SC1090
         . "$PIFS_STATE_FILE"
         return 0
@@ -293,7 +297,7 @@ _pifs_global_setup() {
     generate_test_files
     mount_pifs
 
-    # Save state so child processes / reloads can find the dirs
+    # Save state so other spec files and subshells can find the dirs
     cat > "$PIFS_STATE_FILE" << EOF
 export MDD="$MDD"
 export MNT="$MNT"
@@ -303,26 +307,13 @@ export PIFS_PID="$PIFS_PID"
 EOF
 }
 
-_pifs_global_setup
-
-# ─── Global Teardown (ShellSpec calls this once after ALL specs) ──
-
+# ShellSpec calls this once after ALL specs complete
 shellspec_after_all() {
     if [ -f "$PIFS_STATE_FILE" ]; then
         # shellcheck disable=SC1090
         . "$PIFS_STATE_FILE"
         rm -f "$PIFS_STATE_FILE"
         cleanup_temp_dirs
-    fi
-}
-
-# ─── No-op stubs (spec files still call these via BeforeAll/AfterAll) ──
-
-pifs_setup() {
-    # State already loaded at helper init; re-source in case of subshell
-    if [ -f "$PIFS_STATE_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$PIFS_STATE_FILE"
     fi
 }
 

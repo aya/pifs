@@ -153,9 +153,9 @@ Describe 'File I/O Operations'
     Describe 'fsync'
         It "syncs file data to disk"
             echo "sync test" > "$MNT/fsync_test.txt"
-            # Use dd with fsync flag
-            When call dd if="$MNT/fsync_test.txt" of=/dev/null bs=1 2>/dev/null
+            When call dd if="$MNT/fsync_test.txt" of=/dev/null bs=1
             The status should be success
+            The stderr should be present
         End
 
         It "sync command succeeds on file"
@@ -219,7 +219,7 @@ Describe 'File I/O Operations'
         It "overwrites at end (offset 8)"
             write_at_offset "$MNT/offset_write.txt" 8 "ZZ"
             When call cat "$MNT/offset_write.txt"
-            The output should equal "XXAAYYZZ"
+            The output should equal "XXAAYYAAZZ"
         End
 
         It "file size correct after overwrite without truncation"
@@ -263,7 +263,7 @@ Describe 'File I/O Operations'
             printf 'START' > "$MNT/sparse.txt"
             write_at_offset "$MNT/sparse.txt" 100 "END"
             size=$(file_size "$MNT/sparse.txt")
-            [ "$size" -ge 103 ]
+            When call test "$size" -ge 103
             The status should be success
         End
 
