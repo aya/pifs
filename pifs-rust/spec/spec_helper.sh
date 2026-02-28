@@ -184,11 +184,31 @@ cleanup_temp_dirs() {
 
 # ─── Setup / Teardown ─────────────────────────────────────────
 
+# Singleton state file to track if setup has been done
+PIFS_STATE_FILE="${TMPDIR:-/tmp}/pifs-shellspec-state"
+
 pifs_setup() {
+    # Check if already set up (singleton pattern for multi-file runs)
+    if [ -f "$PIFS_STATE_FILE" ]; then
+        # Load existing state
+        # shellcheck disable=SC1090
+        . "$PIFS_STATE_FILE"
+        return 0
+    fi
+
     MDD=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
     MNT=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mnt.XXXXXX")
     SRC=$(mktemp -d "${TMPDIR:-/tmp}/pifs-src.XXXXXX")
     LOG="${TMPDIR:-/tmp}/pifs-test.log"
+
+    # Save state for other spec files
+    cat > "$PIFS_STATE_FILE" << EOF
+export MDD="$MDD"
+export MNT="$MNT"
+export SRC="$SRC"
+export LOG="$LOG"
+export PIFS_PID="$PIFS_PID"
+EOF
 
     # Build if needed
     if [ ! -x "$PIFS_BIN" ]; then
@@ -197,9 +217,23 @@ pifs_setup() {
 
     generate_test_files
     mount_pifs
+
+    # Update state with PID
+    echo "export PIFS_PID=\"$PIFS_PID\"" >> "$PIFS_STATE_FILE"
 }
 
 pifs_teardown() {
+    # Only teardown if we're the last spec file (check via marker)
+    # For now, always cleanup - ShellSpec runs AfterAll for each Describe
+    if [ -f "$PIFS_STATE_FILE" ]; then
+        rm -f "$PIFS_STATE_FILE"
+        cleanup_temp_dirs
+    fi
+}
+
+# Force cleanup function (can be called manually)
+pifs_force_cleanup() {
+    rm -f "$PIFS_STATE_FILE"
     cleanup_temp_dirs
 }
 
