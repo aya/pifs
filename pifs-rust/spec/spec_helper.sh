@@ -159,14 +159,44 @@ mount_pifs() {
             return 1
         fi
 
-        RUST_LOG=info "$PIFS_BIN" --mdd "$MDD" --log "$LOG" "$MNT" >>"$LOG" 2>&1 &
-        PIFS_PID=$!
-        sleep 2
-
-        if ! mount | grep -q "pifs"; then
-            echo "ERROR: pifs failed to mount" >&2
+        if ! "$PIFS_BIN" --version >/dev/null 2>&1; then
+            echo "ERROR: pifs binary not executable: $PIFS_BIN" >&2
             return 1
         fi
+
+        RUST_LOG=info "$PIFS_BIN" --mdd "$MDD" --log "$LOG" "$MNT" >>"$LOG" 2>&1 &
+        PIFS_PID=$!
+
+        # Poll until the mountpoint is live (up to 10s)
+        _retries=0
+        while [ "$_retries" -lt 20 ]; do
+            # A working FUSE mount lets us stat the root
+            if stat "$MNT/." >/dev/null 2>&1 && mount | grep -q "$MNT"; then
+                break
+            fi
+            # Bail early if the process died
+            if ! kill -0 "$PIFS_PID" 2>/dev/null; then
+                echo "ERROR: pifs process exited before mount was ready" >&2
+                echo "  log: $(tail -5 "$LOG" 2>/dev/null)" >&2
+                return 1
+            fi
+            sleep 0.5
+            _retries=$((_retries + 1))
+        done
+
+        if ! mount | grep -q "$MNT"; then
+            echo "ERROR: pifs failed to mount after 10s" >&2
+            echo "  log: $(tail -5 "$LOG" 2>/dev/null)" >&2
+            kill "$PIFS_PID" 2>/dev/null || true
+            return 1
+        fi
+
+        # Smoke test: create and remove a file to confirm FUSE ops work
+        if ! echo "mount-check" > "$MNT/.pifs_mount_test" 2>/dev/null; then
+            echo "ERROR: pifs mounted but write test failed" >&2
+            return 1
+        fi
+        rm -f "$MNT/.pifs_mount_test" 2>/dev/null
     fi
 }
 
@@ -281,6 +311,12 @@ pifs_setup() {
         # Already set up — just restore state variables
         # shellcheck disable=SC1090
         . "$PIFS_STATE_FILE"
+        # Verify mount is still alive
+        if [ "$DO_MOUNT" = "true" ] && ! mount | grep -q "$MNT"; then
+            echo "ERROR: pifs mount disappeared (MNT=$MNT)" >&2
+            rm -f "$PIFS_STATE_FILE"
+            return 1
+        fi
         return 0
     fi
 
