@@ -418,6 +418,29 @@ Describe 'File I/O Operations'
         AfterAll 'rm -f "$MNT/concurrent.bin"'
     End
 
+    # ─── mmap-based reads (diff, cmp) ─────────────────────────────
+    # Regression: FOPEN_DIRECT_IO on reads prevents demand paging,
+    # causing SIGBUS in tools that use mmap (diff, cmp, execve).
+
+    Describe 'mmap-based reads'
+        setup_mmap() {
+            cp "$SRC/bin_1m.bin" "$MNT/mmap_test.bin"
+        }
+        BeforeAll 'setup_mmap'
+
+        It "diff succeeds on FUSE file vs source"
+            When run diff "$MNT/mmap_test.bin" "$SRC/bin_1m.bin"
+            The status should be success
+        End
+
+        It "cmp succeeds on FUSE file vs source"
+            When run cmp "$MNT/mmap_test.bin" "$SRC/bin_1m.bin"
+            The status should be success
+        End
+
+        AfterAll 'rm -f "$MNT/mmap_test.bin"'
+    End
+
     # ─── Video File Operations ────────────────────────────────────
 
     Describe 'video file operations'
