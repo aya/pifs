@@ -170,10 +170,16 @@ mount_pifs() {
         # the sentinel disappears we know FUSE is mounted over the dir.
         touch "$MNT/.pifs_pre_mount_sentinel"
 
+        # Build pifs CLI arguments
+        _pifs_args="--mdd $MDD --log $LOG"
+        if [ "${PIFS_STORAGE_MODE:-}" = "whole" ]; then
+            _pifs_args="$_pifs_args --whole-file"
+        fi
+
         # Start pifs in the background
         # Close fds 3-9 to prevent inheriting ShellSpec's internal pipes,
         # which would prevent ShellSpec from detecting EOF and exiting.
-        "$PIFS_BIN" --mdd "$MDD" --log "$LOG" "$MNT" \
+        "$PIFS_BIN" $_pifs_args "$MNT" \
             </dev/null >>"$LOG" 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
         PIFS_PID=$!
         disown "$PIFS_PID" 2>/dev/null || true

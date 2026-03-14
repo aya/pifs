@@ -1,3 +1,4 @@
+mod file_data;
 mod filesystem;
 mod ipfs;
 mod types;
@@ -7,6 +8,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use fuser::MountOption;
 
+use file_data::StorageMode;
 use types::PifsFilesystem;
 
 const PIFS_VERSION: &str = "0.1.0";
@@ -21,6 +23,10 @@ struct Cli {
     /// Log file to trace FUSE calls
     #[arg(long)]
     log: Option<PathBuf>,
+
+    /// Use whole-file storage mode (legacy). Default is chunked (256KB chunks).
+    #[arg(long)]
+    whole_file: bool,
 
     /// Mount point
     mountpoint: PathBuf,
@@ -81,9 +87,16 @@ fn main() {
         env_logger::init();
     }
 
+    let storage_mode = if cli.whole_file {
+        StorageMode::WholeFile
+    } else {
+        StorageMode::Chunked
+    };
+
     let fs = PifsFilesystem::new(
         cli.mdd.canonicalize().unwrap_or(cli.mdd),
         cli.log.clone(),
+        storage_mode,
     );
 
     let options = vec![
@@ -95,7 +108,7 @@ fn main() {
         MountOption::CUSTOM("daemon_timeout=600".to_string()),
     ];
 
-    log::info!("mounting pifs at {}", cli.mountpoint.display());
+    log::info!("mounting pifs at {} (storage: {:?})", cli.mountpoint.display(), storage_mode);
     if let Err(e) = fuser::mount2(fs, &cli.mountpoint, &options) {
         eprintln!("pifs: Failed to mount: {}", e);
         std::process::exit(1);

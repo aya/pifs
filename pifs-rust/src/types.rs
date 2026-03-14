@@ -1,39 +1,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::file_data::{FileData, StorageMode};
+
 pub const PIFS_VERSION: &str = "0.1.0";
 pub const HASH_SIZE: usize = 47;
-
-/// In-memory representation of an open file's data.
-pub struct PifsFile {
-    pub data: Vec<u8>,
-    pub size: i64,
-    /// Track whether the file was written to (needs ipfs add on release).
-    pub dirty: bool,
-    /// Highest byte offset written (write frontier).
-    pub write_frontier: usize,
-}
-
-impl PifsFile {
-    pub fn new() -> Self {
-        PifsFile {
-            data: Vec::new(),
-            size: 0,
-            dirty: false,
-            write_frontier: 0,
-        }
-    }
-
-    pub fn with_data(data: Vec<u8>) -> Self {
-        let size = data.len() as i64;
-        PifsFile {
-            data,
-            size,
-            dirty: false,
-            write_frontier: 0,
-        }
-    }
-}
 
 /// The main filesystem state.
 pub struct PifsFilesystem {
@@ -42,21 +13,24 @@ pub struct PifsFilesystem {
     /// Log file path (optional).
     pub log_file: Option<PathBuf>,
     /// Open files indexed by inode.
-    pub files: HashMap<u64, PifsFile>,
+    pub files: HashMap<u64, Box<dyn FileData>>,
     /// Cached file sizes indexed by inode (persists across open/close).
     pub size_cache: HashMap<u64, i64>,
     /// Inode to metadata path mapping.
     pub inode_paths: HashMap<u64, PathBuf>,
+    /// Storage mode for file data.
+    pub storage_mode: StorageMode,
 }
 
 impl PifsFilesystem {
-    pub fn new(mdd: PathBuf, log_file: Option<PathBuf>) -> Self {
+    pub fn new(mdd: PathBuf, log_file: Option<PathBuf>, storage_mode: StorageMode) -> Self {
         PifsFilesystem {
             mdd,
             log_file,
             files: HashMap::new(),
             size_cache: HashMap::new(),
             inode_paths: HashMap::new(),
+            storage_mode,
         }
     }
 

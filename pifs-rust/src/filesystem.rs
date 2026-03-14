@@ -9,8 +9,9 @@ use fuser::{
     ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request, TimeOrNow,
 };
 
+use crate::file_data::{self, StorageMode};
 use crate::ipfs;
-use crate::types::{PifsFile, PifsFilesystem};
+use crate::types::PifsFilesystem;
 
 const TTL: Duration = Duration::from_secs(0);
 
@@ -91,15 +92,23 @@ const FOPEN_PURGE_UBC: u32 = 1 << 31;
 /// to invalidate stale page cache entries.
 ///
 /// Write-mode opens keep DIRECT_IO to prevent kernel page cache replay corruption.
-fn open_flags_for(flags: i32) -> u32 {
-    let accmode = flags & libc::O_ACCMODE;
-    if accmode == libc::O_RDONLY {
-        #[cfg(target_os = "macos")]
-        { FOPEN_PURGE_UBC }
-        #[cfg(not(target_os = "macos"))]
-        { 0 }
-    } else {
-        FOPEN_DIRECT_IO
+///
+/// In Chunked mode, always use DIRECT_IO (even for reads) to prevent the kernel
+/// page cache from interfering with lazy chunk loading.
+fn open_flags_for(flags: i32, mode: StorageMode) -> u32 {
+    match mode {
+        StorageMode::Chunked => FOPEN_DIRECT_IO,
+        StorageMode::WholeFile => {
+            let accmode = flags & libc::O_ACCMODE;
+            if accmode == libc::O_RDONLY {
+                #[cfg(target_os = "macos")]
+                { FOPEN_PURGE_UBC }
+                #[cfg(not(target_os = "macos"))]
+                { 0 }
+            } else {
+                FOPEN_DIRECT_IO
+            }
+        }
     }
 }
 
@@ -130,8 +139,8 @@ impl Filesystem for PifsFilesystem {
 
                 // For regular files, override size with IPFS size
                 if meta.is_file() && meta.size() > 0 {
-                    if let Some(pf) = self.files.get(&ino) {
-                        attr.size = pf.size as u64;
+                    if let Some(fd) = self.files.get(&ino) {
+                        attr.size = fd.size() as u64;
                     } else if let Some(&cached) = self.size_cache.get(&ino) {
                         attr.size = cached as u64;
                     } else {
@@ -597,31 +606,21 @@ impl Filesystem for PifsFilesystem {
         // truncate
         if let Some(new_size) = size {
             let new_size = new_size as i64;
-            if let Some(pf) = self.files.get_mut(&ino) {
-                pf.data.resize(new_size as usize, 0);
-                pf.size = new_size;
-                pf.dirty = true;
-                pf.write_frontier = new_size as usize;
+            if let Some(fd) = self.files.get_mut(&ino) {
+                fd.truncate(new_size as usize);
             } else {
-                let mut data = Vec::new();
-                if let Ok(hashes) = read_hashes(&mdf) {
-                    if !hashes.is_empty() {
-                        if let Ok(d) = ipfs::ipfs_cat(&hashes) {
-                            data = d;
-                        }
+                // File not open — need to load, truncate, and store
+                let hashes = read_hashes(&mdf).unwrap_or_default();
+                match file_data::open_file(self.storage_mode, hashes, None) {
+                    Ok(mut fd) => {
+                        fd.truncate(new_size as usize);
+                        self.files.insert(ino, fd);
+                    }
+                    Err(e) => {
+                        reply.error(e);
+                        return;
                     }
                 }
-                data.resize(new_size as usize, 0);
-                let frontier = new_size as usize;
-                self.files.insert(
-                    ino,
-                    PifsFile {
-                        data,
-                        size: new_size,
-                        dirty: true,
-                        write_frontier: frontier,
-                    },
-                );
             }
             self.size_cache.insert(ino, new_size);
         }
@@ -659,8 +658,8 @@ impl Filesystem for PifsFilesystem {
         match std::fs::symlink_metadata(&mdf) {
             Ok(meta) => {
                 let mut attr = metadata_to_attr(&meta);
-                if let Some(pf) = self.files.get(&ino) {
-                    attr.size = pf.size as u64;
+                if let Some(fd) = self.files.get(&ino) {
+                    attr.size = fd.size() as u64;
                 } else if let Some(&cached) = self.size_cache.get(&ino) {
                     attr.size = cached as u64;
                 }
@@ -710,7 +709,7 @@ impl Filesystem for PifsFilesystem {
                 let attr = metadata_to_attr(&meta);
                 self.register_inode(ino, mdf);
 
-                self.files.insert(ino, PifsFile::new());
+                self.files.insert(ino, file_data::new_file(self.storage_mode));
                 self.size_cache.insert(ino, 0);
 
                 log::info!("create ino={} fd={} mode={:o}", ino, fd, mode);
@@ -745,24 +744,23 @@ impl Filesystem for PifsFilesystem {
             return;
         }
 
-        // Load file data from IPFS
+        // Load file data from IPFS via FileData backend
         let access_mode = flags & libc::O_ACCMODE;
         if access_mode == libc::O_RDONLY {
             match read_hashes(&mdf) {
-                Ok(hashes) if !hashes.is_empty() => match ipfs::ipfs_cat(&hashes) {
-                    Ok(data) => {
-                        let pf = PifsFile::with_data(data);
-                        self.size_cache.insert(ino, pf.size);
-                        self.files.insert(ino, pf);
+                Ok(hashes) => {
+                    let size_hint = self.size_cache.get(&ino).copied();
+                    match file_data::open_file(self.storage_mode, hashes, size_hint) {
+                        Ok(file) => {
+                            self.size_cache.insert(ino, file.size());
+                            self.files.insert(ino, file);
+                        }
+                        Err(e) => {
+                            unsafe { libc::close(fd) };
+                            reply.error(e);
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        unsafe { libc::close(fd) };
-                        reply.error(e);
-                        return;
-                    }
-                },
-                Ok(_) => {
-                    self.files.insert(ino, PifsFile::new());
                 }
                 Err(e) => {
                     unsafe { libc::close(fd) };
@@ -773,27 +771,20 @@ impl Filesystem for PifsFilesystem {
         } else {
             // For write mode, load existing data if available
             if !self.files.contains_key(&ino) {
-                let has_data = self.size_cache.get(&ino).map_or(false, |&s| s > 0);
-                if has_data {
-                    match read_hashes(&mdf) {
-                        Ok(hashes) if !hashes.is_empty() => {
-                            if let Ok(data) = ipfs::ipfs_cat(&hashes) {
-                                self.files.insert(ino, PifsFile::with_data(data));
-                            } else {
-                                self.files.insert(ino, PifsFile::new());
-                            }
-                        }
-                        _ => {
-                            self.files.insert(ino, PifsFile::new());
-                        }
+                let hashes = read_hashes(&mdf).unwrap_or_default();
+                let size_hint = self.size_cache.get(&ino).copied();
+                match file_data::open_file(self.storage_mode, hashes, size_hint) {
+                    Ok(file) => {
+                        self.files.insert(ino, file);
                     }
-                } else {
-                    self.files.insert(ino, PifsFile::new());
+                    Err(_) => {
+                        self.files.insert(ino, file_data::new_file(self.storage_mode));
+                    }
                 }
             }
         }
 
-        let open_flags = open_flags_for(flags);
+        let open_flags = open_flags_for(flags, self.storage_mode);
         log::info!("open ino={} fd={} flags={:o} open_flags={:#x}", ino, fd, flags, open_flags);
         reply.opened(fd as u64, open_flags);
     }
@@ -809,7 +800,7 @@ impl Filesystem for PifsFilesystem {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let pf = match self.files.get(&ino) {
+        let fd = match self.files.get_mut(&ino) {
             Some(f) => f,
             None => {
                 reply.error(libc::ENOENT);
@@ -818,15 +809,13 @@ impl Filesystem for PifsFilesystem {
         };
 
         let offset = offset as usize;
-        if offset >= pf.data.len() {
-            reply.data(&[]);
-            return;
+        match fd.read(offset, size as usize) {
+            Ok(data) => {
+                log::info!("read ino={} offset={} size={} actual={}", ino, offset, size, data.len());
+                reply.data(&data);
+            }
+            Err(e) => reply.error(e),
         }
-
-        let end = std::cmp::min(offset + size as usize, pf.data.len());
-        let data = &pf.data[offset..end];
-        log::info!("read ino={} offset={} size={} actual={}", ino, offset, size, data.len());
-        reply.data(data);
     }
 
     fn write(
@@ -841,7 +830,7 @@ impl Filesystem for PifsFilesystem {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let pf = match self.files.get_mut(&ino) {
+        let fd = match self.files.get_mut(&ino) {
             Some(f) => f,
             None => {
                 reply.error(libc::ENOENT);
@@ -850,34 +839,13 @@ impl Filesystem for PifsFilesystem {
         };
 
         let offset = offset as usize;
-        let end = offset + data.len();
-
-        // Detect kernel page cache replays: if this write is below the
-        // write frontier and the buffer already has data there, the kernel
-        // is replaying stale cached pages. Skip these writes to preserve
-        // the correct data that was written in the first pass.
-        if offset < pf.write_frontier && end <= pf.data.len() {
-            log::debug!(
-                "write ino={} offset={} count={} SKIPPED (replay below frontier={})",
-                ino, offset, data.len(), pf.write_frontier
-            );
-            reply.written(data.len() as u32);
-            return;
+        match fd.write(offset, data) {
+            Ok(written) => {
+                log::info!("write ino={} offset={} count={} size={}", ino, offset, data.len(), fd.size());
+                reply.written(written as u32);
+            }
+            Err(e) => reply.error(e),
         }
-
-        let needed = end;
-        if needed > pf.data.len() {
-            pf.data.resize(needed, 0);
-        }
-        pf.data[offset..end].copy_from_slice(data);
-        if end > pf.write_frontier {
-            pf.write_frontier = end;
-        }
-        pf.size = pf.data.len() as i64;
-        pf.dirty = true;
-
-        log::info!("write ino={} offset={} count={} size={}", ino, offset, data.len(), pf.size);
-        reply.written(data.len() as u32);
     }
 
     fn flush(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
@@ -896,26 +864,21 @@ impl Filesystem for PifsFilesystem {
     ) {
         let mdf = self.resolve_ino(ino);
 
-        if let Some(pf) = self.files.get(&ino) {
-            if pf.dirty {
+        if let Some(mut fd) = self.files.remove(&ino) {
+            if fd.is_dirty() {
                 if let Some(ref mdf_path) = mdf {
-                    match ipfs::ipfs_add(&pf.data) {
-                        Ok(hash) => {
-                            log::info!("release ino={} hash={}", ino, hash);
-                            if let Err(e) = std::fs::write(mdf_path, format!("{}\n", hash)) {
-                                log::error!("failed to write hash to {:?}: {}", mdf_path, e);
-                            }
-                            self.size_cache.insert(ino, pf.size);
+                    match fd.flush_to_ipfs(mdf_path) {
+                        Ok(size) => {
+                            log::info!("release ino={} flushed size={}", ino, size);
+                            self.size_cache.insert(ino, size);
                         }
                         Err(e) => {
-                            log::error!("ipfs add failed for ino={}: {}", ino, e);
+                            log::error!("flush_to_ipfs failed for ino={}: {}", ino, e);
                         }
                     }
                 }
             }
         }
-
-        self.files.remove(&ino);
         unsafe { libc::close(fh as i32) };
 
         log::info!("release ino={}", ino);
@@ -1372,28 +1335,39 @@ mod tests {
     }
 
     #[test]
-    fn test_open_flags_rdonly_no_direct_io() {
-        // Read-only opens must NOT set DIRECT_IO, otherwise mmap/execve fails with SIGBUS
-        let flags = open_flags_for(libc::O_RDONLY);
-        assert_eq!(flags & FOPEN_DIRECT_IO, 0, "O_RDONLY must not set DIRECT_IO");
+    fn test_open_flags_rdonly_no_direct_io_whole_file() {
+        // Read-only opens in WholeFile mode must NOT set DIRECT_IO
+        let flags = open_flags_for(libc::O_RDONLY, StorageMode::WholeFile);
+        assert_eq!(flags & FOPEN_DIRECT_IO, 0, "O_RDONLY WholeFile must not set DIRECT_IO");
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn test_open_flags_rdonly_purges_ubc_on_macos() {
-        let flags = open_flags_for(libc::O_RDONLY);
-        assert_ne!(flags & FOPEN_PURGE_UBC, 0, "O_RDONLY on macOS must set PURGE_UBC");
+        let flags = open_flags_for(libc::O_RDONLY, StorageMode::WholeFile);
+        assert_ne!(flags & FOPEN_PURGE_UBC, 0, "O_RDONLY WholeFile on macOS must set PURGE_UBC");
     }
 
     #[test]
     fn test_open_flags_wronly_uses_direct_io() {
-        let flags = open_flags_for(libc::O_WRONLY);
+        let flags = open_flags_for(libc::O_WRONLY, StorageMode::WholeFile);
         assert_ne!(flags & FOPEN_DIRECT_IO, 0, "O_WRONLY must set DIRECT_IO");
     }
 
     #[test]
     fn test_open_flags_rdwr_uses_direct_io() {
-        let flags = open_flags_for(libc::O_RDWR);
+        let flags = open_flags_for(libc::O_RDWR, StorageMode::WholeFile);
         assert_ne!(flags & FOPEN_DIRECT_IO, 0, "O_RDWR must set DIRECT_IO");
+    }
+
+    #[test]
+    fn test_open_flags_chunked_always_direct_io() {
+        // Chunked mode always uses DIRECT_IO regardless of access mode
+        let rdonly = open_flags_for(libc::O_RDONLY, StorageMode::Chunked);
+        assert_ne!(rdonly & FOPEN_DIRECT_IO, 0, "Chunked O_RDONLY must set DIRECT_IO");
+        let wronly = open_flags_for(libc::O_WRONLY, StorageMode::Chunked);
+        assert_ne!(wronly & FOPEN_DIRECT_IO, 0, "Chunked O_WRONLY must set DIRECT_IO");
+        let rdwr = open_flags_for(libc::O_RDWR, StorageMode::Chunked);
+        assert_ne!(rdwr & FOPEN_DIRECT_IO, 0, "Chunked O_RDWR must set DIRECT_IO");
     }
 }
