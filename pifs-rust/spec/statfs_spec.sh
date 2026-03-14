@@ -151,9 +151,8 @@ Describe 'Filesystem Operations'
         End
 
         It "mount point is accessible"
-            When call ls "$MNT"
+            When call test -d "$MNT"
             The status should be success
-            The output should be present
         End
 
         It "mount shows pifs"

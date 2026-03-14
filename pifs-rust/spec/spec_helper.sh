@@ -13,6 +13,10 @@
 
 set -u
 
+spec_helper_configure() {
+    after_all 'pifs_cleanup'
+}
+
 PROJECT_DIR="${SHELLSPEC_PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 PIFS_BIN="${PROJECT_DIR}/target/debug/pifs"
 
@@ -362,10 +366,14 @@ pifs_setup() {
     # Atomic lock: only one process gets to do setup
     if mkdir "$PIFS_LOCK_DIR" 2>/dev/null; then
         # We hold the lock — do the actual setup
-        MDD=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
-        MNT=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mnt.XXXXXX")
-        SRC=$(mktemp -d "${TMPDIR:-/tmp}/pifs-src.XXXXXX")
-        LOG="${TMPDIR:-/tmp}/pifs-test.log"
+        # Use a shared suffix so mdd/mnt/src are easily associated
+        _pifs_suffix=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
+        _pifs_suffix="${_pifs_suffix##*.}"
+        MDD="${TMPDIR:-/tmp}/pifs-mdd.$_pifs_suffix"
+        MNT="${TMPDIR:-/tmp}/pifs-mnt.$_pifs_suffix"
+        SRC="${TMPDIR:-/tmp}/pifs-src.$_pifs_suffix"
+        mkdir -p "$MNT" "$SRC"
+        LOG="${TMPDIR:-/tmp}/pifs-test.$_pifs_suffix.log"
 
         # Resolve real paths (macOS: /var -> /private/var)
         MNT=$(cd "$MNT" && pwd -P)
