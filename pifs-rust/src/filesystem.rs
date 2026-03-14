@@ -189,11 +189,6 @@ impl Filesystem for PifsFilesystem {
         name: &OsStr,
         reply: ReplyEntry,
     ) {
-        // Hide .git directory when git versioning is enabled
-        if self.git_sync.is_some() && name == ".git" {
-            reply.error(libc::ENOENT);
-            return;
-        }
 
         let parent_path = match self.resolve_ino(parent) {
             Some(p) => p,
@@ -982,10 +977,6 @@ impl Filesystem for PifsFilesystem {
 
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            // Hide .git directory when git versioning is enabled
-            if self.git_sync.is_some() && name == ".git" {
-                continue;
-            }
             if let Ok(meta) = entry.metadata() {
                 let ft = if meta.is_dir() {
                     FileType::Directory

@@ -30,9 +30,9 @@ struct Cli {
     #[arg(long)]
     whole_file: bool,
 
-    /// Enable git versioning of the MDD (metadata directory).
+    /// Enable git versioning of the MDD. Takes the path to the git directory (stored separately from the MDD).
     #[arg(long)]
-    git: bool,
+    git: Option<PathBuf>,
 
     /// Mount point
     mountpoint: PathBuf,
@@ -101,14 +101,14 @@ fn main() {
 
     let mdd = cli.mdd.canonicalize().unwrap_or(cli.mdd);
 
-    let git_sync = if cli.git {
-        match GitSync::new(mdd.clone()) {
+    let git_sync = if let Some(ref git_dir) = cli.git {
+        match GitSync::new(mdd.clone(), git_dir.clone()) {
             Ok(gs) => {
-                log::info!("git MDD versioning enabled");
+                log::info!("git MDD versioning enabled, git_dir={}", git_dir.display());
                 Some(gs)
             }
             Err(e) => {
-                eprintln!("pifs: Failed to initialize git in MDD: {}", e);
+                eprintln!("pifs: Failed to initialize git: {}", e);
                 std::process::exit(1);
             }
         }

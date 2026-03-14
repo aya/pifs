@@ -1,6 +1,6 @@
 #shellcheck shell=sh
 #
-# Tests for Git MDD versioning (--git flag).
+# Tests for Git MDD versioning (--git <dir> flag).
 #
 # Uses its own pifs mount (separate from the shared one) because
 # it needs the --git flag.
@@ -20,13 +20,14 @@ Describe 'Git MDD Versioning'
         _git_root=$(cd "$_git_root" && pwd -P)
         GIT_MDD="$_git_root/mdd"
         GIT_MNT="$_git_root/mnt"
+        PIFS_GIT_DIR="$_git_root/git"
         GIT_LOG="$_git_root/pifs.log"
         mkdir "$GIT_MDD" "$GIT_MNT"
 
         # Sentinel for mount detection
         touch "$GIT_MNT/.pifs_pre_mount_sentinel"
 
-        _pifs_args="--mdd $GIT_MDD --git --log $GIT_LOG"
+        _pifs_args="--mdd $GIT_MDD --git $PIFS_GIT_DIR --log $GIT_LOG"
         if [ "${PIFS_STORAGE_MODE:-}" = "whole" ]; then
             _pifs_args="$_pifs_args --whole-file"
         fi
@@ -84,14 +85,14 @@ Describe 'Git MDD Versioning'
         fi
     }
 
-    # Helper: count git commits in MDD
+    # Helper: count git commits
     git_commit_count() {
-        git -C "$GIT_MDD" rev-list --count HEAD
+        git --git-dir="$PIFS_GIT_DIR" --work-tree="$GIT_MDD" rev-list --count HEAD
     }
 
     # Helper: get last commit message
     git_last_message() {
-        git -C "$GIT_MDD" log -1 --format=%B
+        git --git-dir="$PIFS_GIT_DIR" --work-tree="$GIT_MDD" log -1 --format=%B
     }
 
     # Helper: wait for git commit count to change (debounce up to 5s)
@@ -115,25 +116,19 @@ Describe 'Git MDD Versioning'
     # ─── Git initialization ──────────────────────────────────────
 
     Describe 'git initialization'
-        It ".git directory exists in MDD"
-            When call test -d "$GIT_MDD/.git"
+        It "git dir exists"
+            When call test -d "$PIFS_GIT_DIR"
+            The status should be success
+        End
+
+        It ".git does NOT exist in MDD"
+            When call test ! -e "$GIT_MDD/.git"
             The status should be success
         End
 
         It "initial commit exists"
             When call git_commit_count
             The output should equal "1"
-        End
-
-        It ".git is hidden from FUSE readdir"
-            When call ls -a "$GIT_MNT"
-            The output should not include ".git"
-        End
-
-        It ".git is hidden from FUSE lookup (stat fails)"
-            When call stat "$GIT_MNT/.git"
-            The status should be failure
-            The stderr should be present
         End
     End
 

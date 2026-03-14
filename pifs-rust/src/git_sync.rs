@@ -21,14 +21,15 @@ pub struct GitSync {
 }
 
 impl GitSync {
-    /// Initialize git in the MDD and spawn the background commit thread.
-    pub fn new(mdd: PathBuf) -> Result<Self, String> {
-        git_init(&mdd)?;
+    /// Initialize git in a separate git_dir with the MDD as work tree, and spawn the background commit thread.
+    pub fn new(mdd: PathBuf, git_dir: PathBuf) -> Result<Self, String> {
+        git_init(&mdd, &git_dir)?;
         let (tx, rx) = mpsc::channel();
         let mdd_clone = mdd.clone();
+        let git_dir_clone = git_dir.clone();
         let handle = thread::Builder::new()
             .name("git-sync".to_string())
-            .spawn(move || background_loop(mdd_clone, rx))
+            .spawn(move || background_loop(mdd_clone, git_dir_clone, rx))
             .map_err(|e| format!("failed to spawn git-sync thread: {}", e))?;
         Ok(GitSync {
             sender: tx,
@@ -81,28 +82,43 @@ fn relativize_event(mdd: &Path, event: GitEvent) -> GitEvent {
     }
 }
 
-/// Initialize a git repo in the MDD if one doesn't exist.
-fn git_init(mdd: &Path) -> Result<(), String> {
-    let git_dir = mdd.join(".git");
-    if git_dir.is_dir() {
+/// Initialize a bare git repo at git_dir with mdd as work tree, if not already initialized.
+fn git_init(mdd: &Path, git_dir: &Path) -> Result<(), String> {
+    // If git_dir already contains a repo (has HEAD), skip
+    if git_dir.join("HEAD").is_file() {
         return Ok(());
     }
 
-    run_git(mdd, &["init"])?;
-    // Configure user for commits (local to this repo only)
-    run_git(mdd, &["config", "user.email", "pifs@localhost"])?;
-    run_git(mdd, &["config", "user.name", "pifs"])?;
+    // Create git_dir if it doesn't exist
+    std::fs::create_dir_all(git_dir)
+        .map_err(|e| format!("failed to create git dir '{}': {}", git_dir.display(), e))?;
+
+    // Init bare repo
+    let output = Command::new("git")
+        .args(["init", "--bare"])
+        .arg(git_dir)
+        .output()
+        .map_err(|e| format!("git init --bare: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git init --bare failed: {}", stderr));
+    }
+
+    // Configure user for commits
+    run_git(git_dir, mdd, &["config", "user.email", "pifs@localhost"])?;
+    run_git(git_dir, mdd, &["config", "user.name", "pifs"])?;
 
     // Initial commit (allow empty)
-    run_git(mdd, &["commit", "--allow-empty", "-m", "pifs: initial commit"])?;
+    run_git(git_dir, mdd, &["commit", "--allow-empty", "-m", "pifs: initial commit"])?;
     Ok(())
 }
 
-/// Run a git command in the given directory. Returns stdout on success.
-fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+/// Run a git command with --git-dir and --work-tree. Returns stdout on success.
+fn run_git(git_dir: &Path, work_tree: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
+        .arg("--git-dir").arg(git_dir)
+        .arg("--work-tree").arg(work_tree)
         .args(args)
-        .current_dir(cwd)
         .output()
         .map_err(|e| format!("git {}: {}", args.join(" "), e))?;
     if !output.status.success() {
@@ -113,7 +129,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Background loop: accumulate events, debounce 2s, then commit.
-fn background_loop(mdd: PathBuf, rx: mpsc::Receiver<GitEvent>) {
+fn background_loop(mdd: PathBuf, git_dir: PathBuf, rx: mpsc::Receiver<GitEvent>) {
     let mut pending: Vec<GitEvent> = Vec::new();
     loop {
         let event = if pending.is_empty() {
@@ -127,19 +143,19 @@ fn background_loop(mdd: PathBuf, rx: mpsc::Receiver<GitEvent>) {
             match rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(ev) => ev,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    commit_pending(&mdd, &pending);
+                    commit_pending(&mdd, &git_dir, &pending);
                     pending.clear();
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    commit_pending(&mdd, &pending);
+                    commit_pending(&mdd, &git_dir, &pending);
                     break;
                 }
             }
         };
         match event {
             GitEvent::Shutdown => {
-                commit_pending(&mdd, &pending);
+                commit_pending(&mdd, &git_dir, &pending);
                 break;
             }
             other => pending.push(other),
@@ -148,23 +164,23 @@ fn background_loop(mdd: PathBuf, rx: mpsc::Receiver<GitEvent>) {
 }
 
 /// Stage all changes and commit with a descriptive message.
-fn commit_pending(mdd: &Path, events: &[GitEvent]) {
+fn commit_pending(mdd: &Path, git_dir: &Path, events: &[GitEvent]) {
     if events.is_empty() {
         return;
     }
 
     // Stage all changes
-    if run_git(mdd, &["add", "-A"]).is_err() {
+    if run_git(git_dir, mdd, &["add", "-A"]).is_err() {
         return;
     }
 
     // Check if there's anything to commit
-    if run_git(mdd, &["diff", "--cached", "--quiet"]).is_ok() {
+    if run_git(git_dir, mdd, &["diff", "--cached", "--quiet"]).is_ok() {
         return; // nothing staged
     }
 
     let msg = build_commit_message(events);
-    let _ = run_git(mdd, &["commit", "-m", &msg]);
+    let _ = run_git(git_dir, mdd, &["commit", "-m", &msg]);
 }
 
 /// Build a commit message summarizing the events.
@@ -197,69 +213,65 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pifs-git-test-{}", std::process::id()));
-        let dir = dir.join(format!("{}", std::time::SystemTime::now()
+    fn temp_dirs() -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("pifs-git-test-{}", std::process::id()));
+        let base = base.join(format!("{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        let mdd = base.join("mdd");
+        let git = base.join("git");
+        fs::create_dir_all(&mdd).unwrap();
+        // git_init will create the git dir
+        (mdd, git)
     }
 
-    fn git_log_count(mdd: &Path) -> usize {
-        let out = run_git(mdd, &["rev-list", "--count", "HEAD"]).unwrap();
+    fn git_log_count(git_dir: &Path, mdd: &Path) -> usize {
+        let out = run_git(git_dir, mdd, &["rev-list", "--count", "HEAD"]).unwrap();
         out.trim().parse().unwrap()
     }
 
-    fn git_log_last_message(mdd: &Path) -> String {
-        run_git(mdd, &["log", "-1", "--format=%B"]).unwrap()
+    fn git_log_last_message(git_dir: &Path, mdd: &Path) -> String {
+        run_git(git_dir, mdd, &["log", "-1", "--format=%B"]).unwrap()
     }
 
     #[test]
     fn test_git_init_creates_repo() {
-        let mdd = temp_dir();
-        git_init(&mdd).unwrap();
-        assert!(mdd.join(".git").is_dir());
-        // Should have exactly 1 commit (the initial)
-        assert_eq!(git_log_count(&mdd), 1);
-        fs::remove_dir_all(&mdd).unwrap();
+        let (mdd, git) = temp_dirs();
+        git_init(&mdd, &git).unwrap();
+        assert!(git.join("HEAD").is_file());
+        assert!(!mdd.join(".git").exists());
+        assert_eq!(git_log_count(&git, &mdd), 1);
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn test_git_init_skips_existing_repo() {
-        let mdd = temp_dir();
-        git_init(&mdd).unwrap();
-        // Second call should succeed without error
-        git_init(&mdd).unwrap();
-        // Still only 1 commit
-        assert_eq!(git_log_count(&mdd), 1);
-        fs::remove_dir_all(&mdd).unwrap();
+        let (mdd, git) = temp_dirs();
+        git_init(&mdd, &git).unwrap();
+        git_init(&mdd, &git).unwrap();
+        assert_eq!(git_log_count(&git, &mdd), 1);
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn test_single_file_change_commits() {
-        let mdd = temp_dir();
-        let mut gs = GitSync::new(mdd.clone()).unwrap();
+        let (mdd, git) = temp_dirs();
+        let mut gs = GitSync::new(mdd.clone(), git.clone()).unwrap();
 
-        // Create a file in the MDD
         fs::write(mdd.join("test.txt"), "hello\n").unwrap();
-
-        // Send event and shut down (forces flush)
         gs.send(GitEvent::FileChanged(PathBuf::from("test.txt")));
         gs.shutdown();
 
-        // Should have 2 commits: initial + the file change
-        assert_eq!(git_log_count(&mdd), 2);
-        fs::remove_dir_all(&mdd).unwrap();
+        assert_eq!(git_log_count(&git, &mdd), 2);
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn test_debounce_batches_events() {
-        let mdd = temp_dir();
-        let mut gs = GitSync::new(mdd.clone()).unwrap();
+        let (mdd, git) = temp_dirs();
+        let mut gs = GitSync::new(mdd.clone(), git.clone()).unwrap();
 
-        // Rapidly send 5 events
         for i in 0..5 {
             let name = format!("file{}.txt", i);
             fs::write(mdd.join(&name), format!("content {}\n", i)).unwrap();
@@ -268,38 +280,33 @@ mod tests {
 
         gs.shutdown();
 
-        // Should have 2 commits: initial + 1 batched commit (all 5 events)
-        assert_eq!(git_log_count(&mdd), 2);
-        fs::remove_dir_all(&mdd).unwrap();
+        assert_eq!(git_log_count(&git, &mdd), 2);
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn test_shutdown_flushes_pending() {
-        let mdd = temp_dir();
-        let mut gs = GitSync::new(mdd.clone()).unwrap();
+        let (mdd, git) = temp_dirs();
+        let mut gs = GitSync::new(mdd.clone(), git.clone()).unwrap();
 
         fs::write(mdd.join("pending.txt"), "data\n").unwrap();
         gs.send(GitEvent::FileChanged(PathBuf::from("pending.txt")));
-
-        // Shutdown should flush without waiting for debounce timeout
         gs.shutdown();
 
-        assert_eq!(git_log_count(&mdd), 2);
-        fs::remove_dir_all(&mdd).unwrap();
+        assert_eq!(git_log_count(&git, &mdd), 2);
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn test_no_commit_when_nothing_changed() {
-        let mdd = temp_dir();
-        let mut gs = GitSync::new(mdd.clone()).unwrap();
+        let (mdd, git) = temp_dirs();
+        let mut gs = GitSync::new(mdd.clone(), git.clone()).unwrap();
 
-        // Send event but don't actually change any files
         gs.send(GitEvent::FileChanged(PathBuf::from("phantom.txt")));
         gs.shutdown();
 
-        // Should still have only the initial commit
-        assert_eq!(git_log_count(&mdd), 1);
-        fs::remove_dir_all(&mdd).unwrap();
+        assert_eq!(git_log_count(&git, &mdd), 1);
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -326,44 +333,38 @@ mod tests {
 
     #[test]
     fn test_delete_event() {
-        let mdd = temp_dir();
-        let mut gs = GitSync::new(mdd.clone()).unwrap();
+        let (mdd, git) = temp_dirs();
+        let mut gs = GitSync::new(mdd.clone(), git.clone()).unwrap();
 
-        // Create then delete a file
         let f = mdd.join("to_delete.txt");
         fs::write(&f, "bye\n").unwrap();
-        // First, commit the creation
         gs.send(GitEvent::FileChanged(PathBuf::from("to_delete.txt")));
         gs.shutdown();
 
-        // Now delete
-        let mut gs2 = GitSync::new(mdd.clone()).unwrap();
+        let mut gs2 = GitSync::new(mdd.clone(), git.clone()).unwrap();
         fs::remove_file(&f).unwrap();
         gs2.send(GitEvent::FileDeleted(PathBuf::from("to_delete.txt")));
         gs2.shutdown();
 
-        let msg = git_log_last_message(&mdd);
+        let msg = git_log_last_message(&git, &mdd);
         assert!(msg.contains("deleted: to_delete.txt"));
-        fs::remove_dir_all(&mdd).unwrap();
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn test_drop_calls_shutdown() {
-        let mdd = temp_dir();
+        let (mdd, git) = temp_dirs();
 
         {
-            let gs = GitSync::new(mdd.clone()).unwrap();
+            let gs = GitSync::new(mdd.clone(), git.clone()).unwrap();
             fs::write(mdd.join("drop_test.txt"), "drop\n").unwrap();
             gs.send(GitEvent::FileChanged(PathBuf::from("drop_test.txt")));
-            // gs is dropped here
         }
 
-        // Give the thread a moment to finish after drop
         std::thread::sleep(Duration::from_millis(100));
 
-        // The file change should have been committed on drop
-        assert_eq!(git_log_count(&mdd), 2);
-        fs::remove_dir_all(&mdd).unwrap();
+        assert_eq!(git_log_count(&git, &mdd), 2);
+        fs::remove_dir_all(mdd.parent().unwrap()).unwrap();
     }
 
     #[test]
