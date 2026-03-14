@@ -1,5 +1,6 @@
 mod file_data;
 mod filesystem;
+mod git_sync;
 mod ipfs;
 mod types;
 
@@ -9,6 +10,7 @@ use clap::Parser;
 use fuser::MountOption;
 
 use file_data::StorageMode;
+use git_sync::GitSync;
 use types::PifsFilesystem;
 
 const PIFS_VERSION: &str = "0.1.0";
@@ -27,6 +29,10 @@ struct Cli {
     /// Use whole-file storage mode (legacy). Default is chunked (256KB chunks).
     #[arg(long)]
     whole_file: bool,
+
+    /// Enable git versioning of the MDD (metadata directory).
+    #[arg(long)]
+    git: bool,
 
     /// Mount point
     mountpoint: PathBuf,
@@ -93,10 +99,28 @@ fn main() {
         StorageMode::Chunked
     };
 
+    let mdd = cli.mdd.canonicalize().unwrap_or(cli.mdd);
+
+    let git_sync = if cli.git {
+        match GitSync::new(mdd.clone()) {
+            Ok(gs) => {
+                log::info!("git MDD versioning enabled");
+                Some(gs)
+            }
+            Err(e) => {
+                eprintln!("pifs: Failed to initialize git in MDD: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let fs = PifsFilesystem::new(
-        cli.mdd.canonicalize().unwrap_or(cli.mdd),
+        mdd,
         cli.log.clone(),
         storage_mode,
+        git_sync,
     );
 
     let options = vec![

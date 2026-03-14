@@ -11,3 +11,4 @@ config.status
 Makefile
 pifs
 stamp-h1
+pifs-rust/target/

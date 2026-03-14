@@ -10,6 +10,7 @@ use fuser::{
 };
 
 use crate::file_data::{self, StorageMode};
+use crate::git_sync::GitEvent;
 use crate::ipfs;
 use crate::types::PifsFilesystem;
 
@@ -119,6 +120,13 @@ impl Filesystem for PifsFilesystem {
         Ok(())
     }
 
+    fn destroy(&mut self) {
+        log::info!("pifs filesystem destroying");
+        if let Some(ref mut gs) = self.git_sync {
+            gs.shutdown();
+        }
+    }
+
     // ─── Metadata ────────────────────────────────────────────
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
@@ -181,6 +189,12 @@ impl Filesystem for PifsFilesystem {
         name: &OsStr,
         reply: ReplyEntry,
     ) {
+        // Hide .git directory when git versioning is enabled
+        if self.git_sync.is_some() && name == ".git" {
+            reply.error(libc::ENOENT);
+            return;
+        }
+
         let parent_path = match self.resolve_ino(parent) {
             Some(p) => p,
             None => {
@@ -378,7 +392,8 @@ impl Filesystem for PifsFilesystem {
                 match std::fs::symlink_metadata(&mdf) {
                     Ok(meta) => {
                         let attr = metadata_to_attr(&meta);
-                        self.register_inode(attr.ino, mdf);
+                        self.register_inode(attr.ino, mdf.clone());
+                        self.git_notify(GitEvent::DirCreated(mdf));
                         reply.entry(&TTL, &attr, 0);
                     }
                     Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
@@ -401,6 +416,7 @@ impl Filesystem for PifsFilesystem {
         match std::fs::remove_file(&mdf) {
             Ok(()) => {
                 log::info!("unlink mdf={:?}", mdf);
+                self.git_notify(GitEvent::FileDeleted(mdf));
                 reply.ok();
             }
             Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
@@ -420,6 +436,7 @@ impl Filesystem for PifsFilesystem {
         match std::fs::remove_dir(&mdf) {
             Ok(()) => {
                 log::info!("rmdir mdf={:?}", mdf);
+                self.git_notify(GitEvent::DirDeleted(mdf));
                 reply.ok();
             }
             Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
@@ -447,7 +464,8 @@ impl Filesystem for PifsFilesystem {
             Ok(()) => match std::fs::symlink_metadata(&mdf) {
                 Ok(meta) => {
                     let attr = metadata_to_attr(&meta);
-                    self.register_inode(attr.ino, mdf);
+                    self.register_inode(attr.ino, mdf.clone());
+                    self.git_notify(GitEvent::FileChanged(mdf));
                     reply.entry(&TTL, &attr, 0);
                 }
                 Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
@@ -484,7 +502,8 @@ impl Filesystem for PifsFilesystem {
             Ok(()) => match std::fs::symlink_metadata(&dst) {
                 Ok(meta) => {
                     let attr = metadata_to_attr(&meta);
-                    self.register_inode(attr.ino, dst);
+                    self.register_inode(attr.ino, dst.clone());
+                    self.git_notify(GitEvent::FileChanged(dst));
                     reply.entry(&TTL, &attr, 0);
                 }
                 Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
@@ -534,8 +553,12 @@ impl Filesystem for PifsFilesystem {
         match std::fs::rename(&old, &new_path) {
             Ok(()) => {
                 if let Ok(meta) = std::fs::symlink_metadata(&new_path) {
-                    self.register_inode(meta.ino(), new_path);
+                    self.register_inode(meta.ino(), new_path.clone());
                 }
+                self.git_notify(GitEvent::Renamed {
+                    from: old,
+                    to: new_path,
+                });
                 reply.ok();
             }
             Err(e) => {
@@ -651,6 +674,11 @@ impl Filesystem for PifsFilesystem {
             }
         }
 
+        // Notify git for metadata changes (chmod/chown/utimes), NOT truncate
+        if mode.is_some() || uid.is_some() || gid.is_some() || atime.is_some() || mtime.is_some() {
+            self.git_notify(GitEvent::MetadataChanged(mdf.clone()));
+        }
+
         // Return updated attrs
         match std::fs::symlink_metadata(&mdf) {
             Ok(meta) => {
@@ -704,10 +732,12 @@ impl Filesystem for PifsFilesystem {
             Ok(meta) => {
                 let ino = meta.ino();
                 let attr = metadata_to_attr(&meta);
-                self.register_inode(ino, mdf);
+                self.register_inode(ino, mdf.clone());
 
                 self.files.insert(ino, file_data::new_file(self.storage_mode));
                 self.size_cache.insert(ino, 0);
+
+                self.git_notify(GitEvent::FileChanged(mdf));
 
                 log::info!("create ino={} fd={} mode={:o}", ino, fd, mode);
                 reply.created(&TTL, &attr, 0, fd as u64, FOPEN_DIRECT_IO);
@@ -868,6 +898,7 @@ impl Filesystem for PifsFilesystem {
                         Ok(size) => {
                             log::info!("release ino={} flushed size={}", ino, size);
                             self.size_cache.insert(ino, size);
+                            self.git_notify(GitEvent::FileChanged(mdf_path.clone()));
                         }
                         Err(e) => {
                             log::error!("flush_to_ipfs failed for ino={}: {}", ino, e);
@@ -950,6 +981,11 @@ impl Filesystem for PifsFilesystem {
         all_entries.push((ino, FileType::Directory, "..".to_string()));
 
         for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Hide .git directory when git versioning is enabled
+            if self.git_sync.is_some() && name == ".git" {
+                continue;
+            }
             if let Ok(meta) = entry.metadata() {
                 let ft = if meta.is_dir() {
                     FileType::Directory
@@ -958,7 +994,7 @@ impl Filesystem for PifsFilesystem {
                 } else {
                     FileType::RegularFile
                 };
-                all_entries.push((meta.ino(), ft, entry.file_name().to_string_lossy().to_string()));
+                all_entries.push((meta.ino(), ft, name));
             }
         }
 

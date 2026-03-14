@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::file_data::{FileData, StorageMode};
+use crate::git_sync::{GitEvent, GitSync};
 
 pub const PIFS_VERSION: &str = "0.1.0";
 pub const HASH_SIZE: usize = 47;
@@ -20,10 +21,12 @@ pub struct PifsFilesystem {
     pub inode_paths: HashMap<u64, PathBuf>,
     /// Storage mode for file data.
     pub storage_mode: StorageMode,
+    /// Optional git sync for MDD versioning.
+    pub git_sync: Option<GitSync>,
 }
 
 impl PifsFilesystem {
-    pub fn new(mdd: PathBuf, log_file: Option<PathBuf>, storage_mode: StorageMode) -> Self {
+    pub fn new(mdd: PathBuf, log_file: Option<PathBuf>, storage_mode: StorageMode, git_sync: Option<GitSync>) -> Self {
         PifsFilesystem {
             mdd,
             log_file,
@@ -31,6 +34,14 @@ impl PifsFilesystem {
             size_cache: HashMap::new(),
             inode_paths: HashMap::new(),
             storage_mode,
+            git_sync,
+        }
+    }
+
+    /// Send a GitEvent to the background git-sync thread if enabled.
+    pub fn git_notify(&self, event: GitEvent) {
+        if let Some(ref gs) = self.git_sync {
+            gs.notify(&self.mdd, event);
         }
     }
 
