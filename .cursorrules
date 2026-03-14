@@ -1,0 +1,168 @@
+# Cursor Rules — Test-Driven Development (TDD)
+
+## TDD Workflow
+
+Follow the Red-Green-Refactor cycle strictly:
+
+1. **Red**: Write a failing test FIRST, before writing any implementation code.
+   - The test must clearly express the expected behavior.
+   - Run the test to confirm it fails for the right reason.
+
+2. **Green**: Write the MINIMUM code to make the test pass.
+   - Do not add extra logic, edge case handling, or optimizations yet.
+   - Run the test to confirm it passes.
+
+3. **Refactor**: Clean up the code while keeping all tests green.
+   - Remove duplication, improve naming, simplify logic.
+   - Run all tests after each refactor to ensure nothing breaks.
+
+## Rules
+
+- Never write implementation code without a corresponding failing test.
+- Each test should test ONE behavior or scenario.
+- Tests must be independent — no test should depend on another test's state.
+- Name tests descriptively: `test_<function>_<scenario>_<expected_result>`.
+- Keep tests fast. Mock external dependencies (IPFS, filesystem I/O) when possible.
+- **When fixing a bug, write a test that reproduces the bug FIRST, then fix it.**
+  This is NON-NEGOTIABLE. The test must fail before the fix, proving the bug exists.
+  Then apply the minimal fix and verify the test goes green.
+  Example: SIGBUS on `diff` → write a test calling `cmp` or `diff` on a FUSE file → see it fail → fix FOPEN flags → see it pass.
+- When adding a feature, write the test that describes the feature FIRST, then implement it.
+
+---
+
+## Rust Tests
+
+### Test Organization
+- Unit tests: in the same file as the code, inside `#[cfg(test)] mod tests { ... }`.
+- Integration tests: in `tests/` directory.
+- Use `cargo test` to run all tests, `cargo test <name>` for specific tests.
+
+---
+
+## ShellSpec Integration Tests (pifs-rust)
+
+### Quick Reference
+```bash
+# Red: Run single failing test
+shellspec --shell bash --example "test description" --format documentation
+
+# Green: Run to verify it passes
+shellspec --shell bash --example "test description"
+
+# Refactor: Run all tests
+shellspec --shell bash
+```
+
+### Test Structure
+```sh
+Describe 'Feature name'
+    It "does something specific"
+        When call some_function "arg"
+        The status should be success
+        The output should equal "expected"
+    End
+End
+```
+
+### TDD Cycle with ShellSpec
+
+#### 1. Red Phase — Write Failing Test
+```sh
+# In spec/pifs_spec.sh, add new test:
+Describe 'New feature'
+    It "behaves as expected"
+        When call new_behavior
+        The status should be success
+    End
+End
+```
+Run: `shellspec --shell bash --example "behaves as expected" --format documentation`
+Verify: Test fails with clear error message.
+
+#### 2. Green Phase — Minimal Implementation
+Implement just enough in `src/` to make the test pass.
+Run: `shellspec --shell bash --example "behaves as expected"`
+Verify: Test passes.
+
+#### 3. Refactor Phase — Clean Up
+Improve code quality while keeping test green.
+Run: `shellspec --shell bash` (all tests)
+Verify: All tests still pass.
+
+### ShellSpec Assertions Cheatsheet
+```sh
+# Status
+The status should be success
+The status should be failure
+The status should equal 0
+
+# Output
+The output should equal "exact match"
+The output should include "partial"
+The output should start with "prefix"
+The output should end with "suffix"
+The output should be blank
+The lines of output should equal 5
+
+# Files (use helper functions from spec_helper.sh)
+When call files_identical "$file1" "$file2"
+When call assert_file_size "$file" "1024"
+When call assert_file_mode "$file" "755"
+
+# Path assertions
+The path "$file" should be file
+The path "$file" should be directory
+The path "$file" should be exist
+The path "$file" should not be exist
+
+# Variables
+The variable VAR should equal "value"
+The value "$var" should equal "value"
+```
+
+### Skip Tests Conditionally
+```sh
+Context "when condition applies"
+    Skip if "reason" [ "$CONDITION" != "true" ]
+    It "does something"
+        ...
+    End
+End
+```
+
+### Setup/Teardown
+```sh
+Describe 'Feature'
+    setup() { echo "setup" > "$MNT/file.txt"; }
+    BeforeAll 'setup'
+    AfterAll 'rm -f "$MNT/file.txt"'
+
+    It "tests something"
+        ...
+    End
+End
+```
+
+### Running Specific Tests
+```bash
+# By description (partial match)
+shellspec --example "copies and reads"
+
+# By file
+shellspec spec/pifs_spec.sh
+
+# With verbose output
+shellspec --format documentation
+
+# Dry run (verify structure)
+shellspec --dry-run
+```
+
+---
+
+## Commit Discipline
+
+- Commit after each Green phase (test passes).
+- Commit after each Refactor phase (tests still pass).
+- Commit message should reference what behavior was added/fixed.
