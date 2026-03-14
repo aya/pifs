@@ -7,6 +7,7 @@ use crate::ipfs;
 
 pub const CHUNK_SIZE: usize = 256 * 1024; // 256 KB
 const XATTR_IPFS_HASH: &str = "ipfs.hash";
+const XATTR_IPFS_SIZE: &str = "ipfs.size";
 
 /// Storage mode: whole-file (legacy) or chunked (default).
 #[derive(Debug, Clone, Copy)]
@@ -56,18 +57,18 @@ pub fn open_file(
     }
 }
 
-/// Set the `ipfs.hash` xattr on the MDD file.
-fn set_ipfs_hash_xattr(mdf: &Path, hash: &str) {
-    let c_path = CString::new(mdf.as_os_str().as_bytes()).unwrap();
-    let c_name = CString::new(XATTR_IPFS_HASH).unwrap();
+/// Set an xattr on a file.
+fn set_xattr(path: &Path, name: &str, value: &[u8]) {
+    let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let c_name = CString::new(name).unwrap();
 
     #[cfg(target_os = "macos")]
     let ret = unsafe {
         libc::setxattr(
             c_path.as_ptr(),
             c_name.as_ptr(),
-            hash.as_ptr() as *const libc::c_void,
-            hash.len(),
+            value.as_ptr() as *const libc::c_void,
+            value.len(),
             0,
             0,
         )
@@ -77,27 +78,73 @@ fn set_ipfs_hash_xattr(mdf: &Path, hash: &str) {
         libc::setxattr(
             c_path.as_ptr(),
             c_name.as_ptr(),
-            hash.as_ptr() as *const libc::c_void,
-            hash.len(),
+            value.as_ptr() as *const libc::c_void,
+            value.len(),
             0,
         )
     };
 
     if ret == -1 {
-        log::warn!("failed to set xattr {} on {:?}: {}", XATTR_IPFS_HASH, mdf, std::io::Error::last_os_error());
+        log::warn!("failed to set xattr {} on {:?}: {}", name, path, std::io::Error::last_os_error());
     }
 }
 
-/// Remove the `ipfs.hash` xattr from the MDD file (invalidate cached hash).
-fn remove_ipfs_hash_xattr(mdf: &Path) {
-    let c_path = CString::new(mdf.as_os_str().as_bytes()).unwrap();
-    let c_name = CString::new(XATTR_IPFS_HASH).unwrap();
+/// Remove an xattr from a file (ignore errors).
+fn remove_xattr(path: &Path, name: &str) {
+    let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let c_name = CString::new(name).unwrap();
 
     #[cfg(target_os = "macos")]
     unsafe { libc::removexattr(c_path.as_ptr(), c_name.as_ptr(), libc::XATTR_NOFOLLOW); }
     #[cfg(target_os = "linux")]
     unsafe { libc::lremovexattr(c_path.as_ptr(), c_name.as_ptr()); }
-    // Ignore errors (xattr may not exist)
+}
+
+/// Read an xattr value from a file. Returns None if not found.
+pub fn get_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let c_name = CString::new(name).unwrap();
+
+    // First get the size
+    #[cfg(target_os = "macos")]
+    let size = unsafe {
+        libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW)
+    };
+    #[cfg(target_os = "linux")]
+    let size = unsafe {
+        libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0)
+    };
+
+    if size < 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u8; size as usize];
+    #[cfg(target_os = "macos")]
+    let ret = unsafe {
+        libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0, libc::XATTR_NOFOLLOW)
+    };
+    #[cfg(target_os = "linux")]
+    let ret = unsafe {
+        libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+    };
+
+    if ret < 0 {
+        return None;
+    }
+    buf.truncate(ret as usize);
+    Some(buf)
+}
+
+/// Set `ipfs.size` xattr on the MDD file.
+pub fn set_ipfs_size_xattr(mdf: &Path, size: i64) {
+    set_xattr(mdf, XATTR_IPFS_SIZE, size.to_string().as_bytes());
+}
+
+/// Read `ipfs.size` xattr from the MDD file.
+pub fn get_ipfs_size_xattr(mdf: &Path) -> Option<i64> {
+    let val = get_xattr(mdf, XATTR_IPFS_SIZE)?;
+    String::from_utf8(val).ok()?.trim().parse().ok()
 }
 
 /// Compute the whole-file IPFS hash from chunk hashes in the MDD file.
@@ -111,7 +158,7 @@ pub fn compute_ipfs_hash(mdf: &Path, hashes: &[String], total_size: i64) -> Resu
     let data = ipfs::ipfs_cat(hashes)?;
     let data = &data[..total_bytes.min(data.len())];
     let hash = ipfs::ipfs_add(data)?;
-    set_ipfs_hash_xattr(mdf, &hash);
+    set_xattr(mdf, XATTR_IPFS_HASH, hash.as_bytes());
     Ok(hash)
 }
 
@@ -194,9 +241,11 @@ impl FileData for WholeFileData {
             log::error!("failed to write hash to {:?}: {}", mdf, e);
             libc::EIO
         })?;
-        set_ipfs_hash_xattr(mdf, &hash);
+        set_xattr(mdf, XATTR_IPFS_HASH, hash.as_bytes());
+        let size = self.data.len() as i64;
+        set_ipfs_size_xattr(mdf, size);
         self.dirty = false;
-        Ok(self.data.len() as i64)
+        Ok(size)
     }
 }
 
@@ -483,7 +532,10 @@ impl FileData for ChunkedFileData {
         })?;
 
         // Invalidate cached whole-file hash (will be recomputed lazily on getxattr)
-        remove_ipfs_hash_xattr(mdf);
+        remove_xattr(mdf, XATTR_IPFS_HASH);
+
+        // Store file size as xattr (avoids ipfs files stat calls on next mount)
+        set_ipfs_size_xattr(mdf, self.total_size);
 
         self.dirty_chunks.clear();
         Ok(self.total_size)

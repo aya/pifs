@@ -243,6 +243,47 @@ Describe 'Extended Attributes (xattr)'
         AfterAll 'rm -f "$MNT/xattr_ipfs.txt"'
     End
 
+    # ─── ipfs.size virtual xattr ─────────────────────────────────
+
+    Describe 'ipfs.size xattr'
+        setup_ipfs_size() {
+            echo "ipfs size test content" > "$MNT/xattr_size.txt"
+            sleep 1  # wait for release/flush
+        }
+        BeforeAll 'setup_ipfs_size'
+
+        It "returns ipfs.size via getxattr"
+            When call xattr_get "$MNT/xattr_size.txt" "ipfs.size"
+            The status should be success
+            The output should be present
+        End
+
+        It "ipfs.size matches actual file size"
+            When call xattr_get "$MNT/xattr_size.txt" "ipfs.size"
+            The output should equal "23"
+        End
+
+        It "ipfs.size is persisted as xattr on MDD file"
+            When call xattr_get "$MDD/xattr_size.txt" "ipfs.size"
+            The output should equal "23"
+        End
+
+        It "ipfs.size updates after overwrite with different length"
+            echo "short" > "$MNT/xattr_size.txt"
+            sleep 1  # wait for release/flush
+            When call xattr_get "$MNT/xattr_size.txt" "ipfs.size"
+            The output should equal "6"
+        End
+
+        It "ipfs.size matches stat size"
+            stat_size=$(stat -f%z "$MNT/xattr_size.txt" 2>/dev/null || stat -c%s "$MNT/xattr_size.txt" 2>/dev/null)
+            When call xattr_get "$MNT/xattr_size.txt" "ipfs.size"
+            The output should equal "$stat_size"
+        End
+
+        AfterAll 'rm -f "$MNT/xattr_size.txt"'
+    End
+
     # ─── xattr edge cases ─────────────────────────────────────────
 
     Describe 'xattr edge cases'

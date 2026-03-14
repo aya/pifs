@@ -80,23 +80,12 @@ impl PifsFilesystem {
     /// Try to get the `ipfs.hash` xattr for a file, computing lazily if needed.
     /// Returns Some(hash_bytes) if computed, None to fall through to passthrough.
     fn get_ipfs_hash(&self, ino: u64, mdf: &Path) -> Option<Vec<u8>> {
-        // Only for regular files
         if !mdf.is_file() {
             return None;
         }
         // If xattr already exists on the MDD file, let passthrough handle it
-        let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
-        let c_name = std::ffi::CString::new("ipfs.hash").unwrap();
-        #[cfg(target_os = "macos")]
-        let exists = unsafe {
-            libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW)
-        } >= 0;
-        #[cfg(target_os = "linux")]
-        let exists = unsafe {
-            libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0)
-        } >= 0;
-        if exists {
-            return None; // let passthrough read it
+        if file_data::get_xattr(mdf, "ipfs.hash").is_some() {
+            return None;
         }
         // Compute lazily: read hashes from MDD, get size, compute whole-file hash
         let hashes = read_hashes(mdf).ok()?;
@@ -104,6 +93,7 @@ impl PifsFilesystem {
             return None;
         }
         let total_size = self.size_cache.get(&ino).copied()
+            .or_else(|| file_data::get_ipfs_size_xattr(mdf))
             .unwrap_or_else(|| {
                 hashes.iter()
                     .filter_map(|h| ipfs::ipfs_file_size(h).ok())
@@ -113,6 +103,32 @@ impl PifsFilesystem {
             Ok(hash) => Some(hash.into_bytes()),
             Err(_) => None,
         }
+    }
+
+    /// Try to get the `ipfs.size` xattr for a file, computing if needed.
+    /// Returns Some(size_bytes) if available, None to fall through to passthrough.
+    fn get_ipfs_size(&self, ino: u64, mdf: &Path) -> Option<Vec<u8>> {
+        if !mdf.is_file() {
+            return None;
+        }
+        // If xattr already exists on the MDD file, let passthrough handle it
+        if file_data::get_xattr(mdf, "ipfs.size").is_some() {
+            return None;
+        }
+        // Compute: from in-memory cache, or ipfs files stat
+        let size = self.size_cache.get(&ino).copied()
+            .or_else(|| {
+                let hashes = read_hashes(mdf).ok()?;
+                if hashes.is_empty() {
+                    return None;
+                }
+                let total: i64 = hashes.iter()
+                    .filter_map(|h| ipfs::ipfs_file_size(h).ok())
+                    .sum();
+                file_data::set_ipfs_size_xattr(mdf, total);
+                Some(total)
+            })?;
+        Some(size.to_string().into_bytes())
     }
 }
 
@@ -186,6 +202,9 @@ impl Filesystem for PifsFilesystem {
                         attr.size = fd.size() as u64;
                     } else if let Some(&cached) = self.size_cache.get(&ino) {
                         attr.size = cached as u64;
+                    } else if let Some(size) = file_data::get_ipfs_size_xattr(&mdf) {
+                        self.size_cache.insert(ino, size);
+                        attr.size = size as u64;
                     } else {
                         match read_hashes(&mdf) {
                             Ok(hashes) => {
@@ -200,6 +219,8 @@ impl Filesystem for PifsFilesystem {
                                     }
                                 }
                                 self.size_cache.insert(ino, total);
+                                // Persist for future mounts
+                                file_data::set_ipfs_size_xattr(&mdf, total);
                                 attr.size = total as u64;
                             }
                             Err(e) => {
@@ -248,6 +269,9 @@ impl Filesystem for PifsFilesystem {
                 if meta.is_file() && meta.size() > 0 {
                     if let Some(&cached) = self.size_cache.get(&ino) {
                         attr.size = cached as u64;
+                    } else if let Some(size) = file_data::get_ipfs_size_xattr(&child_path) {
+                        self.size_cache.insert(ino, size);
+                        attr.size = size as u64;
                     } else if let Ok(hashes) = read_hashes(&child_path) {
                         let mut total: i64 = 0;
                         let mut ok = true;
@@ -262,6 +286,7 @@ impl Filesystem for PifsFilesystem {
                         }
                         if ok {
                             self.size_cache.insert(ino, total);
+                            file_data::set_ipfs_size_xattr(&child_path, total);
                             attr.size = total as u64;
                         }
                     }
@@ -1106,16 +1131,21 @@ impl Filesystem for PifsFilesystem {
             }
         };
 
-        // Lazy computation of ipfs.hash for chunked mode
-        if name == "ipfs.hash" {
-            if let Some(hash) = self.get_ipfs_hash(ino, &mdf) {
-                if size == 0 {
-                    reply.size(hash.len() as u32);
-                } else {
-                    reply.data(&hash);
-                }
-                return;
+        // Lazy computation of ipfs.hash / ipfs.size
+        let virtual_xattr = if name == "ipfs.hash" {
+            self.get_ipfs_hash(ino, &mdf)
+        } else if name == "ipfs.size" {
+            self.get_ipfs_size(ino, &mdf)
+        } else {
+            None
+        };
+        if let Some(value) = virtual_xattr {
+            if size == 0 {
+                reply.size(value.len() as u32);
+            } else {
+                reply.data(&value);
             }
+            return;
         }
 
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
@@ -1172,16 +1202,21 @@ impl Filesystem for PifsFilesystem {
             }
         };
 
-        // Lazy computation of ipfs.hash for chunked mode
-        if name == "ipfs.hash" {
-            if let Some(hash) = self.get_ipfs_hash(ino, &mdf) {
-                if size == 0 {
-                    reply.size(hash.len() as u32);
-                } else {
-                    reply.data(&hash);
-                }
-                return;
+        // Lazy computation of ipfs.hash / ipfs.size
+        let virtual_xattr = if name == "ipfs.hash" {
+            self.get_ipfs_hash(ino, &mdf)
+        } else if name == "ipfs.size" {
+            self.get_ipfs_size(ino, &mdf)
+        } else {
+            None
+        };
+        if let Some(value) = virtual_xattr {
+            if size == 0 {
+                reply.size(value.len() as u32);
+            } else {
+                reply.data(&value);
             }
+            return;
         }
 
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
