@@ -93,22 +93,19 @@ const FOPEN_PURGE_UBC: u32 = 1 << 31;
 ///
 /// Write-mode opens keep DIRECT_IO to prevent kernel page cache replay corruption.
 ///
-/// In Chunked mode, always use DIRECT_IO (even for reads) to prevent the kernel
-/// page cache from interfering with lazy chunk loading.
-fn open_flags_for(flags: i32, mode: StorageMode) -> u32 {
-    match mode {
-        StorageMode::Chunked => FOPEN_DIRECT_IO,
-        StorageMode::WholeFile => {
-            let accmode = flags & libc::O_ACCMODE;
-            if accmode == libc::O_RDONLY {
-                #[cfg(target_os = "macos")]
-                { FOPEN_PURGE_UBC }
-                #[cfg(not(target_os = "macos"))]
-                { 0 }
-            } else {
-                FOPEN_DIRECT_IO
-            }
-        }
+/// Both modes use the same strategy: DIRECT_IO for writes (prevents page cache
+/// replay corruption), no DIRECT_IO for reads (allows mmap/execve — DIRECT_IO
+/// prevents demand paging, causing SIGBUS). On macOS, PURGE_UBC invalidates
+/// stale cached pages on read-only opens.
+fn open_flags_for(flags: i32, _mode: StorageMode) -> u32 {
+    let accmode = flags & libc::O_ACCMODE;
+    if accmode == libc::O_RDONLY {
+        #[cfg(target_os = "macos")]
+        { FOPEN_PURGE_UBC }
+        #[cfg(not(target_os = "macos"))]
+        { 0 }
+    } else {
+        FOPEN_DIRECT_IO
     }
 }
 
@@ -1361,10 +1358,11 @@ mod tests {
     }
 
     #[test]
-    fn test_open_flags_chunked_always_direct_io() {
-        // Chunked mode always uses DIRECT_IO regardless of access mode
+    fn test_open_flags_chunked_same_as_whole_file() {
+        // Chunked mode uses the same flags as whole-file: no DIRECT_IO for reads
+        // (mmap/execve needs demand paging), DIRECT_IO for writes
         let rdonly = open_flags_for(libc::O_RDONLY, StorageMode::Chunked);
-        assert_ne!(rdonly & FOPEN_DIRECT_IO, 0, "Chunked O_RDONLY must set DIRECT_IO");
+        assert_eq!(rdonly & FOPEN_DIRECT_IO, 0, "Chunked O_RDONLY must not set DIRECT_IO");
         let wronly = open_flags_for(libc::O_WRONLY, StorageMode::Chunked);
         assert_ne!(wronly & FOPEN_DIRECT_IO, 0, "Chunked O_WRONLY must set DIRECT_IO");
         let rdwr = open_flags_for(libc::O_RDWR, StorageMode::Chunked);
