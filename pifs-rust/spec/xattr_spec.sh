@@ -196,6 +196,53 @@ Describe 'Extended Attributes (xattr)'
         AfterAll 'rm -rf "$MNT/xattr_dir"'
     End
 
+    # ─── ipfs.hash virtual xattr ─────────────────────────────────
+
+    Describe 'ipfs.hash xattr'
+        setup_ipfs_hash() {
+            echo "ipfs hash test content" > "$MNT/xattr_ipfs.txt"
+            sleep 1  # wait for release/flush
+        }
+        BeforeAll 'setup_ipfs_hash'
+
+        It "returns ipfs.hash via getxattr"
+            When call xattr_get "$MNT/xattr_ipfs.txt" "ipfs.hash"
+            The status should be success
+            The output should start with "Qm"
+        End
+
+        It "ipfs.hash has 46 characters"
+            ipfs_hash_length() {
+                xattr_get "$MNT/xattr_ipfs.txt" "ipfs.hash" | tr -d '\n' | wc -c | tr -d ' '
+            }
+            When call ipfs_hash_length
+            The output should equal "46"
+        End
+
+        It "ipfs.hash matches ipfs add of same content"
+            expected=$(echo "ipfs hash test content" | ipfs add -Q 2>/dev/null)
+            When call xattr_get "$MNT/xattr_ipfs.txt" "ipfs.hash"
+            The output should equal "$expected"
+        End
+
+        It "ipfs.hash updates after overwrite"
+            old_hash=$(xattr_get "$MNT/xattr_ipfs.txt" "ipfs.hash")
+            echo "new content for ipfs hash" > "$MNT/xattr_ipfs.txt"
+            sleep 1  # wait for release/flush
+            When call xattr_get "$MNT/xattr_ipfs.txt" "ipfs.hash"
+            The output should start with "Qm"
+            The output should not equal "$old_hash"
+        End
+
+        It "ipfs.hash of updated file matches ipfs add"
+            expected=$(echo "new content for ipfs hash" | ipfs add -Q 2>/dev/null)
+            When call xattr_get "$MNT/xattr_ipfs.txt" "ipfs.hash"
+            The output should equal "$expected"
+        End
+
+        AfterAll 'rm -f "$MNT/xattr_ipfs.txt"'
+    End
+
     # ─── xattr edge cases ─────────────────────────────────────────
 
     Describe 'xattr edge cases'

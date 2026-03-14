@@ -76,6 +76,44 @@ impl PifsFilesystem {
     pub fn register_inode(&mut self, ino: u64, path: PathBuf) {
         self.inode_paths.insert(ino, path);
     }
+
+    /// Try to get the `ipfs.hash` xattr for a file, computing lazily if needed.
+    /// Returns Some(hash_bytes) if computed, None to fall through to passthrough.
+    fn get_ipfs_hash(&self, ino: u64, mdf: &Path) -> Option<Vec<u8>> {
+        // Only for regular files
+        if !mdf.is_file() {
+            return None;
+        }
+        // If xattr already exists on the MDD file, let passthrough handle it
+        let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
+        let c_name = std::ffi::CString::new("ipfs.hash").unwrap();
+        #[cfg(target_os = "macos")]
+        let exists = unsafe {
+            libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0, 0, libc::XATTR_NOFOLLOW)
+        } >= 0;
+        #[cfg(target_os = "linux")]
+        let exists = unsafe {
+            libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0)
+        } >= 0;
+        if exists {
+            return None; // let passthrough read it
+        }
+        // Compute lazily: read hashes from MDD, get size, compute whole-file hash
+        let hashes = read_hashes(mdf).ok()?;
+        if hashes.is_empty() {
+            return None;
+        }
+        let total_size = self.size_cache.get(&ino).copied()
+            .unwrap_or_else(|| {
+                hashes.iter()
+                    .filter_map(|h| ipfs::ipfs_file_size(h).ok())
+                    .sum()
+            });
+        match file_data::compute_ipfs_hash(mdf, &hashes, total_size) {
+            Ok(hash) => Some(hash.into_bytes()),
+            Err(_) => None,
+        }
+    }
 }
 
 /// FOPEN_DIRECT_IO flag — bypass kernel page cache.
@@ -1067,6 +1105,19 @@ impl Filesystem for PifsFilesystem {
                 return;
             }
         };
+
+        // Lazy computation of ipfs.hash for chunked mode
+        if name == "ipfs.hash" {
+            if let Some(hash) = self.get_ipfs_hash(ino, &mdf) {
+                if size == 0 {
+                    reply.size(hash.len() as u32);
+                } else {
+                    reply.data(&hash);
+                }
+                return;
+            }
+        }
+
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 
@@ -1120,6 +1171,19 @@ impl Filesystem for PifsFilesystem {
                 return;
             }
         };
+
+        // Lazy computation of ipfs.hash for chunked mode
+        if name == "ipfs.hash" {
+            if let Some(hash) = self.get_ipfs_hash(ino, &mdf) {
+                if size == 0 {
+                    reply.size(hash.len() as u32);
+                } else {
+                    reply.data(&hash);
+                }
+                return;
+            }
+        }
+
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 

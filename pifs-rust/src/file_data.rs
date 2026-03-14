@@ -1,9 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::ipfs;
 
 pub const CHUNK_SIZE: usize = 256 * 1024; // 256 KB
+const XATTR_IPFS_HASH: &str = "ipfs.hash";
 
 /// Storage mode: whole-file (legacy) or chunked (default).
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +54,65 @@ pub fn open_file(
             Ok(Box::new(ChunkedFileData::from_hashes(hashes, size_hint)))
         }
     }
+}
+
+/// Set the `ipfs.hash` xattr on the MDD file.
+fn set_ipfs_hash_xattr(mdf: &Path, hash: &str) {
+    let c_path = CString::new(mdf.as_os_str().as_bytes()).unwrap();
+    let c_name = CString::new(XATTR_IPFS_HASH).unwrap();
+
+    #[cfg(target_os = "macos")]
+    let ret = unsafe {
+        libc::setxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            hash.as_ptr() as *const libc::c_void,
+            hash.len(),
+            0,
+            0,
+        )
+    };
+    #[cfg(target_os = "linux")]
+    let ret = unsafe {
+        libc::setxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            hash.as_ptr() as *const libc::c_void,
+            hash.len(),
+            0,
+        )
+    };
+
+    if ret == -1 {
+        log::warn!("failed to set xattr {} on {:?}: {}", XATTR_IPFS_HASH, mdf, std::io::Error::last_os_error());
+    }
+}
+
+/// Remove the `ipfs.hash` xattr from the MDD file (invalidate cached hash).
+fn remove_ipfs_hash_xattr(mdf: &Path) {
+    let c_path = CString::new(mdf.as_os_str().as_bytes()).unwrap();
+    let c_name = CString::new(XATTR_IPFS_HASH).unwrap();
+
+    #[cfg(target_os = "macos")]
+    unsafe { libc::removexattr(c_path.as_ptr(), c_name.as_ptr(), libc::XATTR_NOFOLLOW); }
+    #[cfg(target_os = "linux")]
+    unsafe { libc::lremovexattr(c_path.as_ptr(), c_name.as_ptr()); }
+    // Ignore errors (xattr may not exist)
+}
+
+/// Compute the whole-file IPFS hash from chunk hashes in the MDD file.
+/// Reads all chunks from IPFS, concatenates, and does `ipfs add` to get the single hash.
+/// Sets the result as xattr on the MDD file for caching.
+pub fn compute_ipfs_hash(mdf: &Path, hashes: &[String], total_size: i64) -> Result<String, i32> {
+    let total_bytes = total_size as usize;
+    if total_bytes == 0 || hashes.is_empty() {
+        return Err(libc::ENODATA);
+    }
+    let data = ipfs::ipfs_cat(hashes)?;
+    let data = &data[..total_bytes.min(data.len())];
+    let hash = ipfs::ipfs_add(data)?;
+    set_ipfs_hash_xattr(mdf, &hash);
+    Ok(hash)
 }
 
 // ─── WholeFileData ──────────────────────────────────────────
@@ -132,6 +194,7 @@ impl FileData for WholeFileData {
             log::error!("failed to write hash to {:?}: {}", mdf, e);
             libc::EIO
         })?;
+        set_ipfs_hash_xattr(mdf, &hash);
         self.dirty = false;
         Ok(self.data.len() as i64)
     }
@@ -418,6 +481,9 @@ impl FileData for ChunkedFileData {
             log::error!("failed to write hashes to {:?}: {}", mdf, e);
             libc::EIO
         })?;
+
+        // Invalidate cached whole-file hash (will be recomputed lazily on getxattr)
+        remove_ipfs_hash_xattr(mdf);
 
         self.dirty_chunks.clear();
         Ok(self.total_size)
