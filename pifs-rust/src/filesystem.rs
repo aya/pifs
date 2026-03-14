@@ -1083,9 +1083,14 @@ impl Filesystem for PifsFilesystem {
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 
+        // Use XATTR_NOFOLLOW to avoid following symlinks in the MDD.
+        // Without this, getxattr on a MDD symlink whose target is on the
+        // FUSE mount would re-enter the mount and deadlock (single-threaded).
+        let opts = libc::XATTR_NOFOLLOW;
+
         if size == 0 {
             let ret = unsafe {
-                libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0, 0, 0)
+                libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0, 0, opts)
             };
             if ret == -1 {
                 reply.error(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
@@ -1101,7 +1106,7 @@ impl Filesystem for PifsFilesystem {
                     buf.as_mut_ptr() as *mut libc::c_void,
                     size as usize,
                     0,
-                    0,
+                    opts,
                 )
             };
             if ret == -1 {
@@ -1131,9 +1136,10 @@ impl Filesystem for PifsFilesystem {
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 
+        // Use lgetxattr to avoid following symlinks in the MDD.
         if size == 0 {
             let ret = unsafe {
-                libc::getxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0)
+                libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0)
             };
             if ret == -1 {
                 reply.error(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
@@ -1143,7 +1149,7 @@ impl Filesystem for PifsFilesystem {
         } else {
             let mut buf = vec![0u8; size as usize];
             let ret = unsafe {
-                libc::getxattr(
+                libc::lgetxattr(
                     c_path.as_ptr(),
                     c_name.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_void,
@@ -1180,8 +1186,9 @@ impl Filesystem for PifsFilesystem {
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 
         // FUSE may pass flags not valid for macOS setxattr (e.g. 0x8),
-        // causing EINVAL. Strip invalid bits.
-        let safe_flags = sanitize_xattr_flags(flags);
+        // causing EINVAL. Strip invalid bits, then add XATTR_NOFOLLOW
+        // to avoid following symlinks in the MDD (prevents deadlock).
+        let safe_flags = sanitize_xattr_flags(flags) | libc::XATTR_NOFOLLOW;
 
         let ret = unsafe {
             libc::setxattr(
@@ -1221,8 +1228,9 @@ impl Filesystem for PifsFilesystem {
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 
+        // Use lsetxattr to avoid following symlinks in the MDD.
         let ret = unsafe {
-            libc::setxattr(
+            libc::lsetxattr(
                 c_path.as_ptr(),
                 c_name.as_ptr(),
                 value.as_ptr() as *const libc::c_void,
@@ -1247,11 +1255,12 @@ impl Filesystem for PifsFilesystem {
         };
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
 
+        // Use NOFOLLOW/l-variants to avoid following symlinks in the MDD.
         if size == 0 {
             #[cfg(target_os = "macos")]
-            let ret = unsafe { libc::listxattr(c_path.as_ptr(), std::ptr::null_mut(), 0, 0) };
+            let ret = unsafe { libc::listxattr(c_path.as_ptr(), std::ptr::null_mut(), 0, libc::XATTR_NOFOLLOW) };
             #[cfg(target_os = "linux")]
-            let ret = unsafe { libc::listxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
+            let ret = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
 
             if ret == -1 {
                 reply.error(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
@@ -1267,12 +1276,12 @@ impl Filesystem for PifsFilesystem {
                     c_path.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_char,
                     size as usize,
-                    0,
+                    libc::XATTR_NOFOLLOW,
                 )
             };
             #[cfg(target_os = "linux")]
             let ret = unsafe {
-                libc::listxattr(
+                libc::llistxattr(
                     c_path.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_char,
                     size as usize,
@@ -1298,10 +1307,11 @@ impl Filesystem for PifsFilesystem {
         let c_path = std::ffi::CString::new(mdf.as_os_str().as_bytes()).unwrap();
         let c_name = std::ffi::CString::new(name.as_bytes()).unwrap();
 
+        // Use NOFOLLOW/l-variants to avoid following symlinks in the MDD.
         #[cfg(target_os = "macos")]
-        let ret = unsafe { libc::removexattr(c_path.as_ptr(), c_name.as_ptr(), 0) };
+        let ret = unsafe { libc::removexattr(c_path.as_ptr(), c_name.as_ptr(), libc::XATTR_NOFOLLOW) };
         #[cfg(target_os = "linux")]
-        let ret = unsafe { libc::removexattr(c_path.as_ptr(), c_name.as_ptr()) };
+        let ret = unsafe { libc::lremovexattr(c_path.as_ptr(), c_name.as_ptr()) };
 
         if ret == -1 {
             reply.error(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));

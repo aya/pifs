@@ -2,9 +2,11 @@
 #
 # ShellSpec spec_helper for pifs integration tests
 #
-# Setup/teardown is done ONCE here at load time, not per-spec-file.
-# Setup is done ONCE at load time. Teardown via shellspec_after_all.
-# Spec files call pifs_setup in BeforeAll to load state into subshells.
+# pifs_setup is called via BeforeAll in each spec file.
+# The first caller mounts pifs and writes a state file; subsequent
+# callers load state and verify the mount is still alive.
+# Cleanup is best-effort: kill pifs process + remove temp dirs.
+# pifs uses AutoUnmount so the FUSE mount disappears when pifs exits.
 #
 
 # ─── Configuration ────────────────────────────────────────────
@@ -164,14 +166,25 @@ mount_pifs() {
             return 1
         fi
 
-        RUST_LOG=info "$PIFS_BIN" --mdd "$MDD" --log "$LOG" "$MNT" >>"$LOG" 2>&1 &
-        PIFS_PID=$!
+        # Sentinel file: FUSE mount hides underlying dir contents, so when
+        # the sentinel disappears we know FUSE is mounted over the dir.
+        touch "$MNT/.pifs_pre_mount_sentinel"
 
-        # Poll until the mountpoint is live (up to 10s)
+        # Start pifs in the background
+        # Close fds 3-9 to prevent inheriting ShellSpec's internal pipes,
+        # which would prevent ShellSpec from detecting EOF and exiting.
+        "$PIFS_BIN" --mdd "$MDD" --log "$LOG" "$MNT" \
+            </dev/null >>"$LOG" 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+        PIFS_PID=$!
+        disown "$PIFS_PID" 2>/dev/null || true
+
+        # Poll until the FUSE mount is live (up to 10s)
+        # Avoid `mount | grep` — it does statfs on ALL mounts and hangs
+        # if any dead FUSE mount exists from a previous run.
         _retries=0
         while [ "$_retries" -lt 20 ]; do
-            # A working FUSE mount lets us stat the root
-            if stat "$MNT/." >/dev/null 2>&1 && mount | grep -q "$MNT"; then
+            # Sentinel gone = FUSE mounted over the directory
+            if [ ! -f "$MNT/.pifs_pre_mount_sentinel" ]; then
                 break
             fi
             # Bail early if the process died
@@ -184,7 +197,7 @@ mount_pifs() {
             _retries=$((_retries + 1))
         done
 
-        if ! mount | grep -q "$MNT"; then
+        if [ "$_retries" -ge 20 ]; then
             echo "ERROR: pifs failed to mount after 10s" >&2
             echo "  log: $(tail -5 "$LOG" 2>/dev/null)" >&2
             kill "$PIFS_PID" 2>/dev/null || true
@@ -201,16 +214,27 @@ mount_pifs() {
 }
 
 unmount_pifs() {
-    if [ "$DO_MOUNT" = "true" ]; then
-        umount "$MNT" 2>/dev/null || diskutil unmount "$MNT" 2>/dev/null || true
-        sleep 1
+    if [ "$DO_MOUNT" = "true" ] && [ -n "$PIFS_PID" ]; then
+        # Kill pifs process; AutoUnmount handles the FUSE unmount
+        kill "$PIFS_PID" 2>/dev/null || true
+        _w=0
+        while kill -0 "$PIFS_PID" 2>/dev/null && [ "$_w" -lt 10 ]; do
+            sleep 0.5
+            _w=$((_w + 1))
+        done
     fi
 }
 
 cleanup_temp_dirs() {
-    if [ "$DO_MOUNT" = "true" ]; then
-        umount "$MNT" 2>/dev/null || diskutil unmount "$MNT" 2>/dev/null || true
-        sleep 1
+    if [ "$DO_MOUNT" = "true" ] && [ -n "$PIFS_PID" ]; then
+        # Kill pifs; AutoUnmount makes macFUSE unmount automatically
+        kill "$PIFS_PID" 2>/dev/null || true
+        # Wait for process to exit (up to 5s)
+        _w=0
+        while kill -0 "$PIFS_PID" 2>/dev/null && [ "$_w" -lt 10 ]; do
+            sleep 0.5
+            _w=$((_w + 1))
+        done
     fi
     rm -rf "$SRC" "$MDD" 2>/dev/null || true
     if [ "$DO_MOUNT" = "true" ]; then
@@ -302,59 +326,99 @@ compare_range() {
 # ─── Setup / Teardown ────────────────────────────────────────
 #
 # pifs_setup is called via BeforeAll in each spec file.
-# The singleton pattern (state file) ensures mount + file generation
-# happens only once, even across multiple spec files.
+# Uses an atomic lock (mkdir) to ensure only one process does
+# the actual mount + file generation. Others wait and load state.
 #
 
+PIFS_LOCK_DIR="${TMPDIR:-/tmp}/pifs-shellspec-lock"
+
 pifs_setup() {
+    # Fast path: state file already exists — just load it
     if [ -f "$PIFS_STATE_FILE" ]; then
-        # Already set up — just restore state variables
         # shellcheck disable=SC1090
         . "$PIFS_STATE_FILE"
         # Verify mount is still alive
-        if [ "$DO_MOUNT" = "true" ] && ! mount | grep -q "$MNT"; then
-            echo "ERROR: pifs mount disappeared (MNT=$MNT)" >&2
-            rm -f "$PIFS_STATE_FILE"
-            return 1
+        if [ "$DO_MOUNT" = "true" ]; then
+            if ! kill -0 "$PIFS_PID" 2>/dev/null; then
+                # Stale state from a previous run — clean up and re-setup
+                rm -f "$PIFS_STATE_FILE"
+                rmdir "$PIFS_LOCK_DIR" 2>/dev/null || true
+                rm -rf "$SRC" "$MDD" 2>/dev/null || true
+                rmdir "$MNT" 2>/dev/null || true
+                # Fall through to fresh setup below
+            else
+                # Process alive — verify mount is responsive
+                if ! stat "$MNT/." >/dev/null 2>&1; then
+                    echo "ERROR: pifs mount not responding (MNT=$MNT)" >&2
+                    return 1
+                fi
+                return 0
+            fi
+        else
+            return 0
         fi
-        return 0
     fi
 
-    MDD=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
-    MNT=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mnt.XXXXXX")
-    SRC=$(mktemp -d "${TMPDIR:-/tmp}/pifs-src.XXXXXX")
-    LOG="${TMPDIR:-/tmp}/pifs-test.log"
+    # Atomic lock: only one process gets to do setup
+    if mkdir "$PIFS_LOCK_DIR" 2>/dev/null; then
+        # We hold the lock — do the actual setup
+        MDD=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
+        MNT=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mnt.XXXXXX")
+        SRC=$(mktemp -d "${TMPDIR:-/tmp}/pifs-src.XXXXXX")
+        LOG="${TMPDIR:-/tmp}/pifs-test.log"
 
-    # Build if needed
-    if [ ! -x "$PIFS_BIN" ]; then
-        (cd "$PROJECT_DIR" && cargo build 2>&1) || return 1
-    fi
+        # Resolve real paths (macOS: /var -> /private/var)
+        MNT=$(cd "$MNT" && pwd -P)
+        MDD=$(cd "$MDD" && pwd -P)
+        SRC=$(cd "$SRC" && pwd -P)
 
-    generate_test_files
-    mount_pifs
+        # Build if needed
+        if [ ! -x "$PIFS_BIN" ]; then
+            (cd "$PROJECT_DIR" && cargo build 2>&1) || { rmdir "$PIFS_LOCK_DIR"; return 1; }
+        fi
 
-    # Save state so other spec files and subshells can find the dirs
-    cat > "$PIFS_STATE_FILE" << EOF
+        generate_test_files
+        mount_pifs || { rmdir "$PIFS_LOCK_DIR"; return 1; }
+
+        # Save state so other spec files and subshells can find the dirs
+        cat > "$PIFS_STATE_FILE" << EOF
 export MDD="$MDD"
 export MNT="$MNT"
 export SRC="$SRC"
 export LOG="$LOG"
 export PIFS_PID="$PIFS_PID"
 EOF
+    else
+        # Another process is doing setup — wait for state file
+        _wait=0
+        while [ ! -f "$PIFS_STATE_FILE" ] && [ "$_wait" -lt 60 ]; do
+            sleep 1
+            _wait=$((_wait + 1))
+        done
+        if [ ! -f "$PIFS_STATE_FILE" ]; then
+            echo "ERROR: timed out waiting for pifs setup (60s)" >&2
+            return 1
+        fi
+        # shellcheck disable=SC1090
+        . "$PIFS_STATE_FILE"
+    fi
 }
 
-# ShellSpec calls this once after ALL specs complete
-shellspec_after_all() {
+# Cleanup: kill pifs, remove temp dirs and state files.
+# Called manually or via pifs_force_cleanup.
+pifs_cleanup() {
     if [ -f "$PIFS_STATE_FILE" ]; then
         # shellcheck disable=SC1090
         . "$PIFS_STATE_FILE"
         rm -f "$PIFS_STATE_FILE"
         cleanup_temp_dirs
     fi
+    rmdir "$PIFS_LOCK_DIR" 2>/dev/null || true
 }
 
-# Force cleanup function (can be called manually)
+# Force cleanup function (can be called manually, e.g. after interrupted test runs)
 pifs_force_cleanup() {
     rm -f "$PIFS_STATE_FILE"
+    rmdir "$PIFS_LOCK_DIR" 2>/dev/null || true
     cleanup_temp_dirs
 }

@@ -90,6 +90,9 @@ fn main() {
         MountOption::FSName("pifs".to_string()),
         MountOption::AutoUnmount,
         MountOption::AllowOther,
+        // macFUSE kills the mount after 2*daemon_timeout of inactivity (default 60s).
+        // Set high to avoid spurious disconnects during idle periods.
+        MountOption::CUSTOM("daemon_timeout=600".to_string()),
     ];
 
     log::info!("mounting pifs at {}", cli.mountpoint.display());
