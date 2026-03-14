@@ -13,10 +13,6 @@
 
 set -u
 
-spec_helper_configure() {
-    after_all 'pifs_cleanup'
-}
-
 PROJECT_DIR="${SHELLSPEC_PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 PIFS_BIN="${PROJECT_DIR}/target/debug/pifs"
 
@@ -230,19 +226,23 @@ unmount_pifs() {
 }
 
 cleanup_temp_dirs() {
+    if [ "$DO_MOUNT" = "true" ] && [ -n "$MNT" ]; then
+        # Explicitly unmount — AutoUnmount is unreliable when process is killed
+        diskutil unmount "$MNT" >/dev/null 2>&1 \
+            || umount "$MNT" 2>/dev/null \
+            || true
+    fi
     if [ "$DO_MOUNT" = "true" ] && [ -n "$PIFS_PID" ]; then
-        # Kill pifs; AutoUnmount makes macFUSE unmount automatically
         kill "$PIFS_PID" 2>/dev/null || true
-        # Wait for process to exit (up to 5s)
         _w=0
         while kill -0 "$PIFS_PID" 2>/dev/null && [ "$_w" -lt 10 ]; do
             sleep 0.5
             _w=$((_w + 1))
         done
     fi
-    rm -rf "$SRC" "$MDD" 2>/dev/null || true
-    if [ "$DO_MOUNT" = "true" ]; then
-        rmdir "$MNT" 2>/dev/null || true
+    # MDD is $root/mdd — remove the whole parent dir
+    if [ -n "$MDD" ]; then
+        rm -rf "$(dirname "$MDD")" 2>/dev/null || true
     fi
 }
 
@@ -347,8 +347,8 @@ pifs_setup() {
                 # Stale state from a previous run — clean up and re-setup
                 rm -f "$PIFS_STATE_FILE"
                 rmdir "$PIFS_LOCK_DIR" 2>/dev/null || true
-                rm -rf "$SRC" "$MDD" 2>/dev/null || true
-                rmdir "$MNT" 2>/dev/null || true
+                # MDD is $root/mdd — remove the whole parent dir
+                [ -n "$MDD" ] && rm -rf "$(dirname "$MDD")" 2>/dev/null || true
                 # Fall through to fresh setup below
             else
                 # Process alive — verify mount is responsive
@@ -366,26 +366,24 @@ pifs_setup() {
     # Atomic lock: only one process gets to do setup
     if mkdir "$PIFS_LOCK_DIR" 2>/dev/null; then
         # We hold the lock — do the actual setup
-        # Use a shared suffix so mdd/mnt/src are easily associated
-        _pifs_suffix=$(mktemp -d "${TMPDIR:-/tmp}/pifs-mdd.XXXXXX")
-        _pifs_suffix="${_pifs_suffix##*.}"
-        MDD="${TMPDIR:-/tmp}/pifs-mdd.$_pifs_suffix"
-        MNT="${TMPDIR:-/tmp}/pifs-mnt.$_pifs_suffix"
-        SRC="${TMPDIR:-/tmp}/pifs-src.$_pifs_suffix"
-        mkdir -p "$MNT" "$SRC"
-        LOG="${TMPDIR:-/tmp}/pifs-test.$_pifs_suffix.log"
-
-        # Resolve real paths (macOS: /var -> /private/var)
-        MNT=$(cd "$MNT" && pwd -P)
-        MDD=$(cd "$MDD" && pwd -P)
-        SRC=$(cd "$SRC" && pwd -P)
+        # Single parent dir with mdd/, mnt/, src/ subdirs for easy association
+        _pifs_root=$(mktemp -d "${TMPDIR:-/tmp}/pifs-test.XXXXXX")
+        _pifs_root=$(cd "$_pifs_root" && pwd -P)
+        MDD="$_pifs_root/mdd"
+        MNT="$_pifs_root/mnt"
+        SRC="$_pifs_root/src"
+        LOG="$_pifs_root/pifs.log"
+        mkdir "$MDD" "$MNT" "$SRC"
 
         # Build if needed
         if [ ! -x "$PIFS_BIN" ]; then
             (cd "$PROJECT_DIR" && cargo build 2>&1) || { rmdir "$PIFS_LOCK_DIR"; return 1; }
         fi
 
-        generate_test_files
+        # Only generate test files if SRC is empty (allows reuse)
+        if [ -z "$(ls -A "$SRC" 2>/dev/null)" ]; then
+            generate_test_files
+        fi
         mount_pifs || { rmdir "$PIFS_LOCK_DIR"; return 1; }
 
         # Save state so other spec files and subshells can find the dirs
